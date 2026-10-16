@@ -136,7 +136,15 @@ export default function Room() {
       await fetch('/api/simpan-hr', { method: 'POST', body: JSON.stringify(payload) });
     } catch {}
     alert(`Tersimpan! ${payload.namaLengkap} = ${keputusan}`);
-    router.push('/');
+    if (isHR) {
+      router.push('/');
+    } else {
+      router.push('/finished');
+    }
+  };
+
+  const handleCandidateLeave = () => {
+    router.push('/finished');
   };
 
   const candidateLink = typeof window!== 'undefined'? `${window.location.origin}/room/${id}` : '';
@@ -195,7 +203,6 @@ export default function Room() {
       <div style={{ position: 'absolute', bottom: '88px', left: '16px', background: 'rgba(0,0,0,0.65)', color: 'white', padding: '6px 12px', borderRadius: '8px', fontSize: '13px', fontWeight: '600' }}>{isHR? `HR: ${myName}` : (candidateName? `${candidateName} - ${candidatePosisi}` : remoteName)}</div>
       <div style={{ position: 'absolute', top: '16px', left: '16px', background: 'rgba(0,0,0,0.5)', color: 'white', padding: '6px 12px', borderRadius: '20px', fontSize: '11px' }}>{isHR? `Dashboard HR • Room: ${id}` : `Posisi: ${candidatePosisi || `Room: ${id}`}`}</div>
 
-      {/* === FIX UTAMA: PANEL CUMA BUAT HR === */}
       {isHR && (
         <div style={{ position: 'absolute', top: '16px', right: '16px', width: '340px', background: 'white', borderRadius: '16px', padding: '14px', maxHeight: '85vh', overflow: 'auto' }}>
           <h3 style={{ fontSize: '14px', fontWeight: '800', marginBottom: '2px' }}>Dashboard HR</h3>
@@ -214,12 +221,13 @@ export default function Room() {
         </div>
       )}
 
-      {/* === FIX UTAMA: BUBBLE BAWAH BEDA HR vs KANDIDAT === */}
       <div style={{ position: 'absolute', bottom: '16px', left: '50%', transform: 'translateX(-50%)', background: '#1f2937', padding: '8px 16px', borderRadius: '999px', display: 'flex', gap: '10px' }}>
         <button onClick={() => { const s = myVideoRef.current?.srcObject as MediaStream; s?.getAudioTracks().forEach(t => t.enabled =!t.enabled); setMicOn(v =>!v); }} style={{ width: '48px', height: '48px', borderRadius: '50%', background: micOn? '#374151' : '#ef4444', color: 'white' }}>{micOn? '🎤' : '🔇'}</button>
         <button onClick={() => { const s = myVideoRef.current?.srcObject as MediaStream; s?.getVideoTracks().forEach(t => t.enabled =!t.enabled); setCamOn(v =>!v); }} style={{ width: '48px', height: '48px', borderRadius: '50%', background: camOn? '#374151' : '#ef4444', color: 'white' }}>{camOn? '📹' : '📷'}</button>
-        {isHR && (
+        {isHR? (
           <button onClick={handleEndAndSave} style={{ padding: '0 22px', height: '48px', borderRadius: '24px', background: '#ef4444', color: 'white', fontWeight: '700' }}>END & SIMPAN</button>
+        ) : (
+          <button onClick={handleCandidateLeave} style={{ padding: '0 22px', height: '48px', borderRadius: '24px', background: '#111827', color: 'white', fontWeight: '700' }}>Selesai</button>
         )}
       </div>
     </div>

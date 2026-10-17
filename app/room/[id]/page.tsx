@@ -36,10 +36,8 @@ export default function Room() {
   const [keputusan, setKeputusan] = useState("DIPERTIMBANGKAN");
   const recognitionRef = useRef<any>(null);
 
-  // WAITING ROOM
+  // WAITING ROOM - DIMATIIN DULU BIAR LANGSUNG KONEK
   const [waitingList, setWaitingList] = useState<WaitingCandidate[]>([]);
-  const [isWaitingApproval, setIsWaitingApproval] = useState(false);
-  const [isApproved, setIsApproved] = useState(isHR ? true : false);
   const [showNotif, setShowNotif] = useState(false);
 
   const [isSharing, setIsSharing] = useState(false);
@@ -99,7 +97,6 @@ export default function Room() {
       localStorage.setItem("penmeet-name", inputName.trim());
       localStorage.setItem("penmeet-posisi", inputPosisi.trim());
       setShowNameInput(false);
-      setIsWaitingApproval(true);
     }
   };
 
@@ -136,54 +133,25 @@ export default function Room() {
             }
           });
 
-          // WAITING ROOM LOGIC
           callObject.on("participant-joined", (e: any) => {
             if (isHR) {
-              const name = e.participant.user_name || "Kandidat";
-              const newCand: WaitingCandidate = { id: e.participant.session_id, name, posisi: "-" };
-              setWaitingList(prev => [...prev, newCand]);
+              console.log("JOIN:", e.participant.user_name);
               setShowNotif(true);
-              try { new Audio('https://actions.google.com/sounds/v1/alarms/beep_short.ogg').play(); } catch {}
-              setTimeout(() => setShowNotif(false), 8000);
+              setTimeout(() => setShowNotif(false), 3000);
             }
-          });
-
-          callObject.on("app-message", (e: any) => {
-            if (!isHR && e.data?.approved) {
-              setIsApproved(true);
-              setIsWaitingApproval(false);
-            }
-            if (isHR && e.data?.requestJoin) {
-              const newCand: WaitingCandidate = { 
-                id: e.fromId, 
-                name: e.data.name, 
-                posisi: e.data.posisi 
-              };
-              setWaitingList(prev => {
-                if(prev.find(p=>p.id===newCand.id)) return prev;
-                return [...prev, newCand];
-              });
-              setShowNotif(true);
-            }
-          });
-
-          callObject.on("participant-left", (e: any) => {
-            if (isHR) setWaitingList(prev => prev.filter(p => p.id !== e.participant.session_id));
           });
 
           const DAILY_DOMAIN = "https://penmeet.daily.co"; 
           
-          // FIX TERBARU: auto-create room + headers + delay
           try {
             await fetch('/api/create-daily-room', { 
               method: 'POST', 
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ room: id }) 
             });
-            // kasih jeda 1 detik biar room siap di Daily
-            await new Promise(r => setTimeout(r, 1000));
+            await new Promise(r => setTimeout(r, 800));
           } catch (err) {
-            console.log("create room error (biarin lanjut):", err);
+            console.log("create room error:", err);
           }
 
           await callObject.join({ 
@@ -191,18 +159,8 @@ export default function Room() {
             userName: isHR ? `HR-${myName || inputName}` : `${candidateName || myName || inputName} - ${myPosition || inputPosisi}`
           });
 
-          if (!isHR) {
-            setTimeout(() => {
-              try {
-                callObject.sendAppMessage({ requestJoin: true, name: inputName, posisi: inputPosisi }, "*");
-              } catch {}
-            }, 1500);
-          }
-
         } catch (dailyErr) {
           console.log("Daily error:", dailyErr);
-          // JANGAN ALERT LAGI, biarin aja biar gak ganggu
-          console.log("Coba join lagi atau refresh ya Pak, room:", id);
         }
       } catch(e) { console.log(e); alert("Izinkan kamera dulu Pak!"); }
     }
@@ -212,12 +170,6 @@ export default function Room() {
       try { callRef.current?.leave(); callRef.current?.destroy(); } catch {}
     }
   }, [showNameInput]);
-
-  const approveCandidate = (cand: WaitingCandidate) => {
-    try { callRef.current?.sendAppMessage({ approved: true }, "*"); } catch {}
-    setWaitingList(prev => prev.filter(p => p.id !== cand.id));
-    setShowNotif(false);
-  };
 
   const toggleTranskrip = () => {
     if (isRecording) { recognitionRef.current?.stop(); setIsRecording(false); return; }
@@ -280,31 +232,6 @@ export default function Room() {
         </div>
       )}
 
-      {!isHR && isWaitingApproval && !isApproved && (
-        <div style={{ position: 'absolute', inset: 0, background: 'rgba(0,0,0,0.9)', zIndex: 90, display: 'flex', alignItems: 'center', justifyContent: 'center', flexDirection: 'column', color: 'white' }}>
-          <div style={{ fontSize: '48px', marginBottom: '16px' }}>⏳</div>
-          <h2 style={{ fontSize: '20px', fontWeight: '800' }}>Menunggu Persetujuan HR</h2>
-          <p style={{ fontSize: '13px', color: '#ccc', marginTop: '8px', textAlign: 'center', padding: '0 20px' }}>HR ({id}) akan mengizinkan kamu masuk sebentar lagi.</p>
-        </div>
-      )}
-
-      {isHR && showNotif && waitingList.length > 0 && (
-        <div style={{ position: 'absolute', top: '80px', right: '16px', zIndex: 150, width: '340px' }}>
-          {waitingList.map(cand => (
-            <div key={cand.id} style={{ background: 'white', borderRadius: '16px', padding: '14px', boxShadow: '0 10px 30px rgba(0,0,0,0.3)', border: '2px solid #2563eb', marginBottom: '10px' }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '10px' }}>
-                <div style={{ fontSize: '24px' }}>🔔</div>
-                <div><p style={{ fontSize: '13px', fontWeight: '800' }}>{cand.name} ingin bergabung</p><p style={{ fontSize: '11px', color: '#666' }}>Posisi: {cand.posisi || "-"}</p></div>
-              </div>
-              <div style={{ display: 'flex', gap: '8px' }}>
-                <button onClick={() => setWaitingList(prev => prev.filter(p => p.id !== cand.id))} style={{ flex: 1, padding: '10px', background: '#e5e7eb', borderRadius: '10px', fontWeight: '700', fontSize: '12px' }}>Tolak</button>
-                <button onClick={() => approveCandidate(cand)} style={{ flex: 1, padding: '10px', background: '#16a34a', color: 'white', borderRadius: '10px', fontWeight: '700', fontSize: '12px' }}>✅ Izinkan Masuk</button>
-              </div>
-            </div>
-          ))}
-        </div>
-      )}
-
       <video ref={remoteVideoRef} autoPlay playsInline style={{ width: '100%', height: '100%', objectFit: 'contain', background: 'black' }} />
       <video ref={myVideoRef} autoPlay playsInline muted style={{ position: 'absolute', bottom: '20px', right: '20px', width: '140px', height: '105px', borderRadius: '12px', objectFit: 'cover', transform: 'scaleX(-1)', border: '2px solid white', background: '#222' }} />
 
@@ -312,7 +239,7 @@ export default function Room() {
       
       {isHR && (
         <div style={{ position: 'absolute', top: '16px', right: '16px', width: '340px', background: 'white', borderRadius: '16px', padding: '14px', maxHeight: '85vh', overflow: 'auto' }}>
-          <h3 style={{ fontSize: '14px', fontWeight: '800' }}>Dashboard HR {waitingList.length > 0 && `• 🔔 ${waitingList.length} menunggu`}</h3>
+          <h3 style={{ fontSize: '14px', fontWeight: '800' }}>Dashboard HR {showNotif && "• 🟢 Ada yang join!"}</h3>
           <p style={{ fontSize: '11px', color: '#666', marginBottom: '12px' }}>Room: {id}</p>
           <div style={{ background: '#f3f4f6', padding: '10px', borderRadius: '10px', marginBottom: '12px' }}>
             <p style={{ fontSize: '10px', fontWeight: '800', marginBottom: '6px' }}>LINK KANDIDAT:</p>

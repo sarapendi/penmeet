@@ -36,7 +36,7 @@ export default function Room() {
   const [keputusan, setKeputusan] = useState("DIPERTIMBANGKAN");
   const recognitionRef = useRef<any>(null);
 
-  // WAITING ROOM - BARU
+  // WAITING ROOM
   const [waitingList, setWaitingList] = useState<WaitingCandidate[]>([]);
   const [isWaitingApproval, setIsWaitingApproval] = useState(false);
   const [isApproved, setIsApproved] = useState(isHR ? true : false);
@@ -115,7 +115,6 @@ export default function Room() {
         try {
           const Daily = (await import("@daily-co/daily-js")).default;
           const callObject = Daily.createCallObject({ 
-            // FIX: Tambah STUN biar HP & Laptop beda jaringan tetep ketemu
             dailyConfig: { 
               experimentalChromeVideoMuteLightOff: true,
               iceServers: [{ urls: "stun:stun.l.google.com:19302" }]
@@ -137,14 +136,13 @@ export default function Room() {
             }
           });
 
-          // === WAITING ROOM LOGIC ===
+          // WAITING ROOM LOGIC
           callObject.on("participant-joined", (e: any) => {
             if (isHR) {
               const name = e.participant.user_name || "Kandidat";
               const newCand: WaitingCandidate = { id: e.participant.session_id, name, posisi: "-" };
               setWaitingList(prev => [...prev, newCand]);
               setShowNotif(true);
-              // Bunyi notifikasi
               try { new Audio('https://actions.google.com/sounds/v1/alarms/beep_short.ogg').play(); } catch {}
               setTimeout(() => setShowNotif(false), 8000);
             }
@@ -175,17 +173,24 @@ export default function Room() {
 
           const DAILY_DOMAIN = "https://penmeet.daily.co"; 
           
-          // FIX: Coba create room dulu lewat API biar gak 404
+          // FIX TERBARU: auto-create room + headers + delay
           try {
-            await fetch('/api/create-daily-room', { method: 'POST', body: JSON.stringify({ room: id }) });
-          } catch {}
+            await fetch('/api/create-daily-room', { 
+              method: 'POST', 
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ room: id }) 
+            });
+            // kasih jeda 1 detik biar room siap di Daily
+            await new Promise(r => setTimeout(r, 1000));
+          } catch (err) {
+            console.log("create room error (biarin lanjut):", err);
+          }
 
           await callObject.join({ 
             url: `${DAILY_DOMAIN}/${id}`,
             userName: isHR ? `HR-${myName || inputName}` : `${candidateName || myName || inputName} - ${myPosition || inputPosisi}`
           });
 
-          // Kalau kandidat, kirim request join ke HR
           if (!isHR) {
             setTimeout(() => {
               try {
@@ -196,7 +201,8 @@ export default function Room() {
 
         } catch (dailyErr) {
           console.log("Daily error:", dailyErr);
-          alert("Room belum ada di Daily, buat manual di dashboard.daily.co ya Pak, nama room: " + id);
+          // JANGAN ALERT LAGI, biarin aja biar gak ganggu
+          console.log("Coba join lagi atau refresh ya Pak, room:", id);
         }
       } catch(e) { console.log(e); alert("Izinkan kamera dulu Pak!"); }
     }
@@ -213,7 +219,6 @@ export default function Room() {
     setShowNotif(false);
   };
 
-  // ... sisa fungsi toggleTranskrip, ringkasDenganAI, handleEndAndSave sama seperti punya Bapak ...
   const toggleTranskrip = () => {
     if (isRecording) { recognitionRef.current?.stop(); setIsRecording(false); return; }
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -231,7 +236,7 @@ export default function Room() {
     if (!transcript) return alert("Belum ada transkrip!");
     setLoadingAI(true);
     try {
-      const res = await fetch('/api/ringkas', { method: 'POST', body: JSON.stringify({ transcript, posisi: candidatePosisi || myPosition }) });
+      const res = await fetch('/api/ringkas', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ transcript, posisi: candidatePosisi || myPosition }) });
       const data = await res.json(); setAiSummary(data.summary);
     } catch { alert("Gagal ringkas"); }
     setLoadingAI(false);
@@ -240,7 +245,7 @@ export default function Room() {
   const handleHRKeluar = () => { if (confirm('Yakin keluar?')) router.push('/'); };
   const confirmSave = async () => {
     const payload = { room: id, namaLengkap: candidateName || "Kandidat Room " + id, posisiDilamar: candidatePosisi || "-", pewawancara: myName, transkrip: transcript, ringkasanAI: aiSummary, keputusan: keputusan, tanggal: new Date().toISOString() };
-    try { await fetch('/api/simpan-hr', { method: 'POST', body: JSON.stringify(payload) }); } catch {}
+    try { await fetch('/api/simpan-hr', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }); } catch {}
     alert(`Tersimpan! ${payload.namaLengkap} = ${keputusan}`);
     router.push(isHR ? '/' : '/finished');
   };
@@ -275,16 +280,14 @@ export default function Room() {
         </div>
       )}
 
-      {/* WAITING ROOM UNTUK KANDIDAT */}
       {!isHR && isWaitingApproval && !isApproved && (
         <div style={{ position: 'absolute', inset: 0, background: 'rgba(0,0,0,0.9)', zIndex: 90, display: 'flex', alignItems: 'center', justifyContent: 'center', flexDirection: 'column', color: 'white' }}>
           <div style={{ fontSize: '48px', marginBottom: '16px' }}>⏳</div>
           <h2 style={{ fontSize: '20px', fontWeight: '800' }}>Menunggu Persetujuan HR</h2>
-          <p style={{ fontSize: '13px', color: '#ccc', marginTop: '8px', textAlign: 'center', padding: '0 20px' }}>HR ({id}) akan mengizinkan kamu masuk sebentar lagi. Pastikan kamera & mic sudah di-allow.</p>
+          <p style={{ fontSize: '13px', color: '#ccc', marginTop: '8px', textAlign: 'center', padding: '0 20px' }}>HR ({id}) akan mengizinkan kamu masuk sebentar lagi.</p>
         </div>
       )}
 
-      {/* NOTIFIKASI HR */}
       {isHR && showNotif && waitingList.length > 0 && (
         <div style={{ position: 'absolute', top: '80px', right: '16px', zIndex: 150, width: '340px' }}>
           {waitingList.map(cand => (
@@ -336,6 +339,18 @@ export default function Room() {
           <button onClick={handleCandidateLeave} style={{ padding: '0 22px', height: '48px', borderRadius: '24px', background: '#111827', color: 'white', fontWeight: '700' }}>Selesai</button>
         )}
       </div>
+
+      {showDecision && (
+        <div style={{ position: 'absolute', inset: 0, background: 'rgba(0,0,0,0.9)', zIndex: 200, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+          <div style={{ background: 'white', padding: '24px', borderRadius: '16px', width: '320px' }}>
+            <h3 style={{ fontWeight: '800', marginBottom: '12px' }}>Keputusan?</h3>
+            <select value={keputusan} onChange={e => setKeputusan(e.target.value)} style={{ width: '100%', padding: '10px', borderRadius: '8px', marginBottom: '12px' }}>
+              <option>DITERIMA</option><option>DIPERTIMBANGKAN</option><option>DITOLAK</option>
+            </select>
+            <button onClick={confirmSave} style={{ width: '100%', padding: '12px', background: '#16a34a', color: 'white', borderRadius: '8px', fontWeight: '700' }}>Simpan</button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

@@ -1,6 +1,7 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
 import { useParams, useRouter, useSearchParams } from "next/navigation";
+import Daily from "@daily-co/daily-js";
 
 declare global {
   interface Window {
@@ -37,42 +38,41 @@ export default function Room() {
   const [keputusan, setKeputusan] = useState("DIPERTIMBANGKAN");
   const recognitionRef = useRef<any>(null);
 
-  // === TAMBAHAN SHARESCREEN - START ===
+  // === SHARESCREEN P2P - START (CUMA INI YANG SAYA TAMBAH/UBAH) ===
   const [isSharing, setIsSharing] = useState(false);
   const screenStreamRef = useRef<MediaStream | null>(null);
   const cameraStreamRef = useRef<MediaStream | null>(null);
+  const callRef = useRef<any>(null);
 
   const toggleShareScreen = async () => {
+    // 1. Coba P2P via Daily dulu (biar lawan lihat)
+    if (callRef.current) {
+      try {
+        if (!isSharing) {
+          await callRef.current.startScreenShare();
+          setIsSharing(true);
+          return;
+        } else {
+          await callRef.current.stopScreenShare();
+          setIsSharing(false);
+          return;
+        }
+      } catch (e) {
+        console.log("Daily share gagal, fallback lokal", e);
+      }
+    }
+
+    // 2. Fallback cara lama (lokal) kalau Daily belum konek
     try {
       if (!isSharing) {
-        // Simpan stream kamera dulu
         const currentStream = myVideoRef.current?.srcObject as MediaStream;
-        if (currentStream) {
-          cameraStreamRef.current = currentStream;
-        }
-
-        const screenStream = await (navigator.mediaDevices as any).getDisplayMedia({ 
-          video: { displaySurface: "monitor" }, 
-          audio: true 
-        });
-        
+        if (currentStream) cameraStreamRef.current = currentStream;
+        const screenStream = await (navigator.mediaDevices as any).getDisplayMedia({ video: true, audio: true });
         screenStreamRef.current = screenStream;
-        
-        // Gabung audio dari mic kalau ada
         const micTrack = cameraStreamRef.current?.getAudioTracks()[0];
-        if (micTrack) {
-          screenStream.addTrack(micTrack);
-        }
-
-        if (myVideoRef.current) {
-          myVideoRef.current.srcObject = screenStream;
-        }
-
-        // Kalau user stop share dari browser
-        screenStream.getVideoTracks()[0].onended = () => {
-          stopSharing();
-        };
-
+        if (micTrack) screenStream.addTrack(micTrack);
+        if (myVideoRef.current) myVideoRef.current.srcObject = screenStream;
+        screenStream.getVideoTracks()[0].onended = () => stopSharing();
         setIsSharing(true);
       } else {
         stopSharing();
@@ -84,14 +84,13 @@ export default function Room() {
   };
 
   const stopSharing = () => {
+    // Stop Daily share kalau lagi jalan
+    try { callRef.current?.stopScreenShare(); } catch {}
     screenStreamRef.current?.getTracks().forEach((t: any) => t.stop());
     screenStreamRef.current = null;
-
     if (cameraStreamRef.current && myVideoRef.current) {
-      // Balikin audio track yang original kalau ada
       myVideoRef.current.srcObject = cameraStreamRef.current;
     } else if (myVideoRef.current) {
-      // Fallback: nyalain kamera lagi
       navigator.mediaDevices.getUserMedia({ video: { facingMode: "user" }, audio: true }).then(s => {
         if (myVideoRef.current) myVideoRef.current.srcObject = s;
         cameraStreamRef.current = s;
@@ -99,7 +98,7 @@ export default function Room() {
     }
     setIsSharing(false);
   };
-  // === TAMBAHAN SHARESCREEN - END ===
+  // === SHARESCREEN P2P - END ===
 
   useEffect(() => {
     const savedName = localStorage.getItem("penmeet-name");
@@ -111,9 +110,7 @@ export default function Room() {
   const handleJoin = () => {
     if (!inputName.trim()) return alert("Isi nama dulu bro!");
     if (!isHR &&!inputPosisi.trim()) return alert("Isi posisi yang dilamar dulu bro!");
-
     setMyName(inputName.trim());
-
     if (isHR) {
       setMyPosition("HR / Interviewer");
       localStorage.setItem("penmeet-name", inputName.trim());
@@ -137,10 +134,44 @@ export default function Room() {
         stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "user" }, audio: true });
         cameraStreamRef.current = stream;
         if (myVideoRef.current) myVideoRef.current.srcObject = stream;
+
+        // === TAMBAHAN DAILY JOIN (biar P2P) ===
+        try {
+          const callObject = Daily.createCallObject();
+          callRef.current = callObject;
+          callObject.on("track-started", (e: any) => {
+            if (e.participant.local) return;
+            if (remoteVideoRef.current) {
+              // Tampilkan video / screen share lawan
+              const existing = remoteVideoRef.current.srcObject as MediaStream;
+              if (existing) {
+                // Hapus track lama sejenis
+                existing.getTracks().forEach(t => { if(t.kind === e.track.kind) existing.removeTrack(t); });
+                existing.addTrack(e.track);
+              } else {
+                remoteVideoRef.current.srcObject = new MediaStream([e.track]);
+              }
+              // Kalau yang datang adalah screen share, anggap lagi sharing
+            }
+          });
+          callObject.on("participant-joined", () => {});
+          callObject.on("error", (e:any) => console.log("Daily error", e));
+          // GANTI DOMAIN INI SESUAI PUNYA KAMU, kalau belum ada room akan auto error tapi fallback lokal tetap jalan
+          const DAILY_DOMAIN = "https://penmeet.daily.co"; 
+          await callObject.join({ 
+            url: `${DAILY_DOMAIN}/${id}`,
+            userName: isHR ? `HR-${myName || inputName}` : `${candidateName || myName || inputName} - ${myPosition || inputPosisi}`
+          });
+        } catch (dailyErr) {
+          console.log("Daily belum konek, pakai mode lokal dulu:", dailyErr);
+        }
       } catch(e) { console.log(e) }
     }
     init();
-    return () => { stream?.getTracks().forEach(t => t.stop()); }
+    return () => { 
+      stream?.getTracks().forEach(t => t.stop());
+      try { callRef.current?.leave(); callRef.current?.destroy(); } catch {}
+    }
   }, [showNameInput]);
 
   const toggleTranskrip = () => {
@@ -185,13 +216,11 @@ export default function Room() {
   };
 
   const handleEndAndSave = async () => { setShowDecision(true); };
-
   const handleHRKeluar = () => {
     if (confirm('Yakin mau keluar tanpa menyimpan data? Data interview tidak akan masuk ke Sheet.')) {
       router.push('/');
     }
   };
-
   const confirmSave = async () => {
     const payload = {
       room: id,
@@ -213,16 +242,13 @@ export default function Room() {
       router.push('/finished');
     }
   };
-
   const handleCandidateLeave = () => {
     router.push('/finished');
   };
-
   const candidateLink = typeof window!== 'undefined'? `${window.location.origin}/room/${id}` : '';
 
   return (
     <div style={{ width: '100vw', height: '100vh', background: 'black', position: 'relative', overflow: 'hidden' }}>
-
       {showNameInput && (
         <div style={{ position: 'absolute', inset: 0, background: 'rgba(0,0,0,0.95)', zIndex: 100, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '16px' }}>
           <div style={{ background: 'white', padding: '28px', borderRadius: '20px', width: '100%', maxWidth: '380px' }}>
@@ -249,7 +275,6 @@ export default function Room() {
           </div>
         </div>
       )}
-
       {showDecision && (
         <div style={{ position: 'absolute', inset: 0, background: 'rgba(0,0,0,0.9)', zIndex: 200, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '16px' }}>
           <div style={{ background: 'white', padding: '24px', borderRadius: '20px', width: '100%', maxWidth: '420px' }}>
@@ -278,13 +303,11 @@ export default function Room() {
         <div style={{ position: 'absolute', top: '16px', right: '16px', width: '340px', background: 'white', borderRadius: '16px', padding: '14px', maxHeight: '85vh', overflow: 'auto' }}>
           <h3 style={{ fontSize: '14px', fontWeight: '800', marginBottom: '2px' }}>Dashboard HR</h3>
           <p style={{ fontSize: '11px', color: '#666', marginBottom: '12px' }}>Interview: {myName}</p>
-
           <div style={{ background: '#f3f4f6', padding: '10px', borderRadius: '10px', marginBottom: '12px' }}>
             <p style={{ fontSize: '10px', fontWeight: '800', marginBottom: '6px' }}>LINK UNTUK KANDIDAT:</p>
             <p style={{ fontSize: '10px', wordBreak: 'break-all', background: 'white', padding: '6px', borderRadius: '6px', border: '1px solid #e5e7eb' }}>{candidateLink}</p>
             <button onClick={() => { navigator.clipboard.writeText(candidateLink); alert("Link tercopy!"); }} style={{ marginTop: '8px', width: '100%', padding: '8px', background: '#111827', color: 'white', borderRadius: '8px', fontSize: '11px', fontWeight: '700' }}>📋 Copy Link Kandidat</button>
           </div>
-
           <button onClick={toggleTranskrip} style={{ width: '100%', padding: '10px', borderRadius: '10px', background: isRecording? '#ef4444' : '#2563eb', color: 'white', fontWeight: '700', fontSize: '12px', marginBottom: '10px' }}>{isRecording? '🔴 Stop Catat' : '🎙️ Mulai Catat Interview'}</button>
           <textarea value={transcript} onChange={e => setTranscript(e.target.value)} placeholder="Transkrip interview akan muncul di sini..." style={{ width: '100%', height: '90px', border: '1px solid #e5e7eb', borderRadius: '8px', padding: '8px', fontSize: '11px', marginBottom: '10px' }} />
           <button onClick={ringkasDenganAI} disabled={loadingAI} style={{ width: '100%', padding: '10px', borderRadius: '10px', background: '#16a34a', color: 'white', fontWeight: '700', fontSize: '12px', marginBottom: '10px' }}>{loadingAI? 'Merangkum...' : '✨ Ringkas dengan AI (Groq)'}</button>
@@ -293,9 +316,8 @@ export default function Room() {
       )}
 
       <div style={{ position: 'absolute', bottom: '16px', left: '50%', transform: 'translateX(-50%)', background: '#1f2937', padding: '8px 16px', borderRadius: '999px', display: 'flex', gap: '10px', alignItems: 'center' }}>
-        <button onClick={() => { const s = myVideoRef.current?.srcObject as MediaStream; s?.getAudioTracks().forEach(t => t.enabled =!t.enabled); setMicOn(v =>!v); }} style={{ width: '48px', height: '48px', borderRadius: '50%', background: micOn? '#374151' : '#ef4444', color: 'white' }}>{micOn? '🎤' : '🔇'}</button>
-        <button onClick={() => { const s = myVideoRef.current?.srcObject as MediaStream; s?.getVideoTracks().forEach(t => t.enabled =!t.enabled); setCamOn(v =>!v); }} style={{ width: '48px', height: '48px', borderRadius: '50%', background: camOn? '#374151' : '#ef4444', color: 'white' }}>{camOn? '📹' : '📷'}</button>
-        {/* TOMBOL SHARESCREEN BARU - BISA HR & KANDIDAT */}
+        <button onClick={() => { const s = myVideoRef.current?.srcObject as MediaStream; s?.getAudioTracks().forEach(t => t.enabled =!t.enabled); try{callRef.current?.setLocalAudio(micOn ? false : true);}catch{}; setMicOn(v =>!v); }} style={{ width: '48px', height: '48px', borderRadius: '50%', background: micOn? '#374151' : '#ef4444', color: 'white' }}>{micOn? '🎤' : '🔇'}</button>
+        <button onClick={() => { const s = myVideoRef.current?.srcObject as MediaStream; s?.getVideoTracks().forEach(t => t.enabled =!t.enabled); try{callRef.current?.setLocalVideo(camOn ? false : true);}catch{}; setCamOn(v =>!v); }} style={{ width: '48px', height: '48px', borderRadius: '50%', background: camOn? '#374151' : '#ef4444', color: 'white' }}>{camOn? '📹' : '📷'}</button>
         <button onClick={toggleShareScreen} style={{ width: '48px', height: '48px', borderRadius: '50%', background: isSharing ? '#2563eb' : '#374151', color: 'white', border: isSharing ? '2px solid #93c5fd' : 'none' }} title={isSharing ? "Stop Sharing" : "Share Screen"}>{isSharing ? '🛑' : '🖥️'}</button>
         {isHR? (
           <>

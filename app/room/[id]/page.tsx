@@ -21,12 +21,13 @@ export default function Room() {
   const [myPosition, setMyPosition] = useState("");
   const [candidateName, setCandidateName] = useState("");
   const [candidatePosisi, setCandidatePosisi] = useState("");
-  const [remoteName, setRemoteName] = useState("Kandidat");
+  const [remoteName, setRemoteName] = useState("Menunggu...");
   const [showNameInput, setShowNameInput] = useState(true);
   const [inputName, setInputName] = useState("");
   const [inputPosisi, setInputPosisi] = useState("");
   const [micOn, setMicOn] = useState(true);
   const [camOn, setCamOn] = useState(true);
+  const [status, setStatus] = useState("Siap...");
 
   const [isRecording, setIsRecording] = useState(false);
   const [transcript, setTranscript] = useState("");
@@ -36,7 +37,6 @@ export default function Room() {
   const [keputusan, setKeputusan] = useState("DIPERTIMBANGKAN");
   const recognitionRef = useRef<any>(null);
 
-  // WAITING ROOM - DIMATIIN DULU BIAR LANGSUNG KONEK
   const [waitingList, setWaitingList] = useState<WaitingCandidate[]>([]);
   const [showNotif, setShowNotif] = useState(false);
 
@@ -52,25 +52,9 @@ export default function Room() {
         else { await callRef.current.stopScreenShare(); setIsSharing(false); return; }
       } catch (e) { console.log("Daily share gagal", e); }
     }
-    try {
-      if (!isSharing) {
-        const currentStream = myVideoRef.current?.srcObject as MediaStream;
-        if (currentStream) cameraStreamRef.current = currentStream;
-        const screenStream = await (navigator.mediaDevices as any).getDisplayMedia({ video: true, audio: true });
-        screenStreamRef.current = screenStream;
-        const micTrack = cameraStreamRef.current?.getAudioTracks()[0];
-        if (micTrack) screenStream.addTrack(micTrack);
-        if (myVideoRef.current) myVideoRef.current.srcObject = screenStream;
-        screenStream.getVideoTracks()[0].onended = () => stopSharing();
-        setIsSharing(true);
-      } else { stopSharing(); }
-    } catch (e) { alert("Gagal share screen"); }
   };
   const stopSharing = () => {
     try { callRef.current?.stopScreenShare(); } catch {}
-    screenStreamRef.current?.getTracks().forEach((t: any) => t.stop());
-    screenStreamRef.current = null;
-    if (cameraStreamRef.current && myVideoRef.current) myVideoRef.current.srcObject = cameraStreamRef.current;
     setIsSharing(false);
   };
 
@@ -107,61 +91,89 @@ export default function Room() {
       try {
         stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
         cameraStreamRef.current = stream;
-        if (myVideoRef.current) myVideoRef.current.srcObject = stream;
-
-        try {
-          const Daily = (await import("@daily-co/daily-js")).default;
-          const callObject = Daily.createCallObject({ 
-            dailyConfig: { 
-              experimentalChromeVideoMuteLightOff: true,
-              iceServers: [{ urls: "stun:stun.l.google.com:19302" }]
-            }
-          });
-          callRef.current = callObject;
-
-          callObject.on("track-started", (e: any) => {
-            if (e.participant.local) return;
-            if (remoteVideoRef.current) {
-              const existing = remoteVideoRef.current.srcObject as MediaStream;
-              if (existing) {
-                existing.getTracks().forEach(t => { if(t.kind === e.track.kind) existing.removeTrack(t); });
-                existing.addTrack(e.track);
-              } else {
-                remoteVideoRef.current.srcObject = new MediaStream([e.track]);
-              }
-              setRemoteName(e.participant.user_name || "Kandidat");
-            }
-          });
-
-          callObject.on("participant-joined", (e: any) => {
-            if (isHR) {
-              console.log("JOIN:", e.participant.user_name);
-              setShowNotif(true);
-              setTimeout(() => setShowNotif(false), 3000);
-            }
-          });
-
-          const DAILY_DOMAIN = "https://penmeet.daily.co"; 
-          
-          try {
-            await fetch('/api/create-daily-room', { 
-              method: 'POST', 
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ room: id }) 
-            });
-            await new Promise(r => setTimeout(r, 800));
-          } catch (err) {
-            console.log("create room error:", err);
-          }
-
-          await callObject.join({ 
-            url: `${DAILY_DOMAIN}/${id}`,
-            userName: isHR ? `HR-${myName || inputName}` : `${candidateName || myName || inputName} - ${myPosition || inputPosisi}`
-          });
-
-        } catch (dailyErr) {
-          console.log("Daily error:", dailyErr);
+        if (myVideoRef.current) {
+          myVideoRef.current.srcObject = stream;
+          myVideoRef.current.play().catch(()=>{});
         }
+
+        const Daily = (await import("@daily-co/daily-js")).default;
+        const callObject = Daily.createCallObject();
+        callRef.current = callObject;
+
+        // FIX UTAMA BIAR GAK HITAM
+        const attachParticipant = (p: any) => {
+          if (!p || p.local) return;
+          console.log("attach", p.user_name, p.tracks);
+          const vTrack = p.tracks?.video?.persistentTrack || p.tracks?.video?.track;
+          const aTrack = p.tracks?.audio?.persistentTrack || p.tracks?.audio?.track;
+          
+          if ((vTrack || aTrack) && remoteVideoRef.current) {
+            let ms = remoteVideoRef.current.srcObject as MediaStream;
+            if (!ms) ms = new MediaStream();
+            
+            if (vTrack) {
+              const oldV = ms.getVideoTracks();
+              oldV.forEach(t => ms.removeTrack(t));
+              ms.addTrack(vTrack);
+            }
+            if (aTrack) {
+              const oldA = ms.getAudioTracks();
+              oldA.forEach(t => ms.removeTrack(t));
+              ms.addTrack(aTrack);
+            }
+            remoteVideoRef.current.srcObject = ms;
+            remoteVideoRef.current.play().then(()=> {
+              setRemoteName(p.user_name || "Tersambung");
+              setStatus(`✅ Tersambung: ${p.user_name}`);
+            }).catch(()=>{});
+          }
+        };
+
+        callObject.on("track-started", (e: any) => {
+          console.log("track-started", e.track.kind, e.participant.user_name);
+          attachParticipant(e.participant);
+        });
+
+        callObject.on("participant-joined", (e: any) => {
+          console.log("joined", e.participant.user_name);
+          setStatus(`🔔 ${e.participant.user_name} masuk...`);
+          setShowNotif(true);
+          setTimeout(()=> attachParticipant(e.participant), 300);
+          setTimeout(()=> attachParticipant(e.participant), 1000);
+          setTimeout(()=> attachParticipant(e.participant), 2000);
+          setTimeout(()=> setShowNotif(false), 4000);
+        });
+
+        callObject.on("participant-updated", (e: any) => {
+          attachParticipant(e.participant);
+        });
+
+        const DAILY_DOMAIN = "https://penmeet.daily.co"; 
+        
+        try {
+          await fetch('/api/create-daily-room', { 
+            method: 'POST', 
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ room: id }) 
+          });
+          await new Promise(r => setTimeout(r, 800));
+        } catch (err) {}
+
+        setStatus("Join room...");
+        await callObject.join({ 
+          url: `${DAILY_DOMAIN}/${id}`,
+          userName: isHR ? `HR-${myName || inputName}` : `${candidateName || myName || inputName} - ${myPosition || inputPosisi}`
+        });
+        setStatus("Menunggu lawan join...");
+
+        // Cek yang sudah ada di room
+        setTimeout(() => {
+          const parts = callObject.participants();
+          Object.values(parts).forEach((p: any) => {
+            if (!p.local) attachParticipant(p);
+          });
+        }, 1000);
+
       } catch(e) { console.log(e); alert("Izinkan kamera dulu Pak!"); }
     }
     init();
@@ -232,14 +244,14 @@ export default function Room() {
         </div>
       )}
 
-      <video ref={remoteVideoRef} autoPlay playsInline style={{ width: '100%', height: '100%', objectFit: 'contain', background: 'black' }} />
-      <video ref={myVideoRef} autoPlay playsInline muted style={{ position: 'absolute', bottom: '20px', right: '20px', width: '140px', height: '105px', borderRadius: '12px', objectFit: 'cover', transform: 'scaleX(-1)', border: '2px solid white', background: '#222' }} />
+      <video ref={remoteVideoRef} autoPlay playsInline style={{ width: '100%', height: '100%', objectFit: 'contain', background: '#0a0a0a' }} />
+      <video ref={myVideoRef} autoPlay playsInline muted style={{ position: 'absolute', bottom: '90px', right: '20px', width: '140px', height: '105px', borderRadius: '12px', objectFit: 'cover', transform: 'scaleX(-1)', border: '2px solid white', background: '#222', zIndex: 10 }} />
 
-      <div style={{ position: 'absolute', bottom: '88px', left: '16px', background: 'rgba(0,0,0,0.65)', color: 'white', padding: '6px 12px', borderRadius: '8px', fontSize: '13px', fontWeight: '600' }}>{isHR? `HR: ${myName}` : (candidateName? `${candidateName} - ${candidatePosisi}` : remoteName)} {isSharing && "• 🔵 Sharing"}</div>
+      <div style={{ position: 'absolute', top: '12px', left: '12px', background: 'rgba(0,0,0,0.7)', color: 'white', padding: '6px 12px', borderRadius: '8px', fontSize: '12px', zIndex: 20 }}>{status} - {remoteName} {isSharing && "• Sharing"}</div>
       
       {isHR && (
-        <div style={{ position: 'absolute', top: '16px', right: '16px', width: '340px', background: 'white', borderRadius: '16px', padding: '14px', maxHeight: '85vh', overflow: 'auto' }}>
-          <h3 style={{ fontSize: '14px', fontWeight: '800' }}>Dashboard HR {showNotif && "• 🟢 Ada yang join!"}</h3>
+        <div style={{ position: 'absolute', top: '50px', right: '16px', width: '340px', background: 'white', borderRadius: '16px', padding: '14px', maxHeight: '85vh', overflow: 'auto', zIndex: 20 }}>
+          <h3 style={{ fontSize: '14px', fontWeight: '800' }}>Dashboard HR {showNotif && "• 🟢 JOIN!"}</h3>
           <p style={{ fontSize: '11px', color: '#666', marginBottom: '12px' }}>Room: {id}</p>
           <div style={{ background: '#f3f4f6', padding: '10px', borderRadius: '10px', marginBottom: '12px' }}>
             <p style={{ fontSize: '10px', fontWeight: '800', marginBottom: '6px' }}>LINK KANDIDAT:</p>
@@ -253,7 +265,7 @@ export default function Room() {
         </div>
       )}
 
-      <div style={{ position: 'absolute', bottom: '16px', left: '50%', transform: 'translateX(-50%)', background: '#1f2937', padding: '8px 16px', borderRadius: '999px', display: 'flex', gap: '10px', alignItems: 'center' }}>
+      <div style={{ position: 'absolute', bottom: '16px', left: '50%', transform: 'translateX(-50%)', background: '#1f2937', padding: '8px 16px', borderRadius: '999px', display: 'flex', gap: '10px', alignItems: 'center', zIndex: 30 }}>
         <button onClick={() => { const s = myVideoRef.current?.srcObject as MediaStream; s?.getAudioTracks().forEach(t => t.enabled =!t.enabled); setMicOn(v=>!v); }} style={{ width: '48px', height: '48px', borderRadius: '50%', background: micOn? '#374151' : '#ef4444', color: 'white' }}>{micOn? '🎤' : '🔇'}</button>
         <button onClick={() => { const s = myVideoRef.current?.srcObject as MediaStream; s?.getVideoTracks().forEach(t => t.enabled =!t.enabled); setCamOn(v=>!v); }} style={{ width: '48px', height: '48px', borderRadius: '50%', background: camOn? '#374151' : '#ef4444', color: 'white' }}>{camOn? '📹' : '📷'}</button>
         <button onClick={toggleShareScreen} style={{ width: '48px', height: '48px', borderRadius: '50%', background: isSharing ? '#2563eb' : '#374151', color: 'white' }}>{isSharing ? '🛑' : '🖥️'}</button>

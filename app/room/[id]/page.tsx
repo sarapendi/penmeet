@@ -37,6 +37,70 @@ export default function Room() {
   const [keputusan, setKeputusan] = useState("DIPERTIMBANGKAN");
   const recognitionRef = useRef<any>(null);
 
+  // === TAMBAHAN SHARESCREEN - START ===
+  const [isSharing, setIsSharing] = useState(false);
+  const screenStreamRef = useRef<MediaStream | null>(null);
+  const cameraStreamRef = useRef<MediaStream | null>(null);
+
+  const toggleShareScreen = async () => {
+    try {
+      if (!isSharing) {
+        // Simpan stream kamera dulu
+        const currentStream = myVideoRef.current?.srcObject as MediaStream;
+        if (currentStream) {
+          cameraStreamRef.current = currentStream;
+        }
+
+        const screenStream = await (navigator.mediaDevices as any).getDisplayMedia({ 
+          video: { displaySurface: "monitor" }, 
+          audio: true 
+        });
+        
+        screenStreamRef.current = screenStream;
+        
+        // Gabung audio dari mic kalau ada
+        const micTrack = cameraStreamRef.current?.getAudioTracks()[0];
+        if (micTrack) {
+          screenStream.addTrack(micTrack);
+        }
+
+        if (myVideoRef.current) {
+          myVideoRef.current.srcObject = screenStream;
+        }
+
+        // Kalau user stop share dari browser
+        screenStream.getVideoTracks()[0].onended = () => {
+          stopSharing();
+        };
+
+        setIsSharing(true);
+      } else {
+        stopSharing();
+      }
+    } catch (e) {
+      console.log("Gagal share:", e);
+      alert("Gagal share screen bro, coba lagi!");
+    }
+  };
+
+  const stopSharing = () => {
+    screenStreamRef.current?.getTracks().forEach((t: any) => t.stop());
+    screenStreamRef.current = null;
+
+    if (cameraStreamRef.current && myVideoRef.current) {
+      // Balikin audio track yang original kalau ada
+      myVideoRef.current.srcObject = cameraStreamRef.current;
+    } else if (myVideoRef.current) {
+      // Fallback: nyalain kamera lagi
+      navigator.mediaDevices.getUserMedia({ video: { facingMode: "user" }, audio: true }).then(s => {
+        if (myVideoRef.current) myVideoRef.current.srcObject = s;
+        cameraStreamRef.current = s;
+      });
+    }
+    setIsSharing(false);
+  };
+  // === TAMBAHAN SHARESCREEN - END ===
+
   useEffect(() => {
     const savedName = localStorage.getItem("penmeet-name");
     const savedPosisi = localStorage.getItem("penmeet-posisi");
@@ -71,6 +135,7 @@ export default function Room() {
     async function init() {
       try {
         stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "user" }, audio: true });
+        cameraStreamRef.current = stream;
         if (myVideoRef.current) myVideoRef.current.srcObject = stream;
       } catch(e) { console.log(e) }
     }
@@ -204,9 +269,9 @@ export default function Room() {
       )}
 
       <video ref={remoteVideoRef} autoPlay playsInline style={{ width: '100%', height: '100%', objectFit: 'contain', background: 'black' }} />
-      <video ref={myVideoRef} autoPlay playsInline muted style={{ position: 'absolute', bottom: '20px', right: '20px', width: '140px', height: '105px', borderRadius: '12px', objectFit: 'cover', transform: 'scaleX(-1)', border: '2px solid white', background: '#222' }} />
+      <video ref={myVideoRef} autoPlay playsInline muted style={{ position: 'absolute', bottom: '20px', right: '20px', width: '140px', height: '105px', borderRadius: '12px', objectFit: 'cover', transform: isSharing ? 'scaleX(1)' : 'scaleX(-1)', border: '2px solid white', background: '#222' }} />
 
-      <div style={{ position: 'absolute', bottom: '88px', left: '16px', background: 'rgba(0,0,0,0.65)', color: 'white', padding: '6px 12px', borderRadius: '8px', fontSize: '13px', fontWeight: '600' }}>{isHR? `HR: ${myName}` : (candidateName? `${candidateName} - ${candidatePosisi}` : remoteName)}</div>
+      <div style={{ position: 'absolute', bottom: '88px', left: '16px', background: 'rgba(0,0,0,0.65)', color: 'white', padding: '6px 12px', borderRadius: '8px', fontSize: '13px', fontWeight: '600' }}>{isHR? `HR: ${myName}` : (candidateName? `${candidateName} - ${candidatePosisi}` : remoteName)} {isSharing && "• 🔵 Sharing Screen"}</div>
       <div style={{ position: 'absolute', top: '16px', left: '16px', background: 'rgba(0,0,0,0.5)', color: 'white', padding: '6px 12px', borderRadius: '20px', fontSize: '11px' }}>{isHR? `Dashboard HR • Room: ${id}` : `Posisi: ${candidatePosisi || `Room: ${id}`}`}</div>
 
       {isHR && (
@@ -230,6 +295,8 @@ export default function Room() {
       <div style={{ position: 'absolute', bottom: '16px', left: '50%', transform: 'translateX(-50%)', background: '#1f2937', padding: '8px 16px', borderRadius: '999px', display: 'flex', gap: '10px', alignItems: 'center' }}>
         <button onClick={() => { const s = myVideoRef.current?.srcObject as MediaStream; s?.getAudioTracks().forEach(t => t.enabled =!t.enabled); setMicOn(v =>!v); }} style={{ width: '48px', height: '48px', borderRadius: '50%', background: micOn? '#374151' : '#ef4444', color: 'white' }}>{micOn? '🎤' : '🔇'}</button>
         <button onClick={() => { const s = myVideoRef.current?.srcObject as MediaStream; s?.getVideoTracks().forEach(t => t.enabled =!t.enabled); setCamOn(v =>!v); }} style={{ width: '48px', height: '48px', borderRadius: '50%', background: camOn? '#374151' : '#ef4444', color: 'white' }}>{camOn? '📹' : '📷'}</button>
+        {/* TOMBOL SHARESCREEN BARU - BISA HR & KANDIDAT */}
+        <button onClick={toggleShareScreen} style={{ width: '48px', height: '48px', borderRadius: '50%', background: isSharing ? '#2563eb' : '#374151', color: 'white', border: isSharing ? '2px solid #93c5fd' : 'none' }} title={isSharing ? "Stop Sharing" : "Share Screen"}>{isSharing ? '🛑' : '🖥️'}</button>
         {isHR? (
           <>
             <button onClick={handleHRKeluar} style={{ padding: '0 18px', height: '48px', borderRadius: '24px', background: '#e5e7eb', color: '#374151', fontWeight: '700', fontSize: '13px' }}>Keluar</button>

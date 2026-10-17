@@ -1,7 +1,7 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
 import { useParams, useRouter, useSearchParams } from "next/navigation";
-import Daily from "@daily-co/daily-js";
+// FIX BUILD: hapus import statis Daily biar Vercel gak error
 
 declare global {
   interface Window {
@@ -45,7 +45,6 @@ export default function Room() {
   const callRef = useRef<any>(null);
 
   const toggleShareScreen = async () => {
-    // 1. Coba P2P via Daily dulu (biar lawan lihat)
     if (callRef.current) {
       try {
         if (!isSharing) {
@@ -61,8 +60,6 @@ export default function Room() {
         console.log("Daily share gagal, fallback lokal", e);
       }
     }
-
-    // 2. Fallback cara lama (lokal) kalau Daily belum konek
     try {
       if (!isSharing) {
         const currentStream = myVideoRef.current?.srcObject as MediaStream;
@@ -84,7 +81,6 @@ export default function Room() {
   };
 
   const stopSharing = () => {
-    // Stop Daily share kalau lagi jalan
     try { callRef.current?.stopScreenShare(); } catch {}
     screenStreamRef.current?.getTracks().forEach((t: any) => t.stop());
     screenStreamRef.current = null;
@@ -135,28 +131,25 @@ export default function Room() {
         cameraStreamRef.current = stream;
         if (myVideoRef.current) myVideoRef.current.srcObject = stream;
 
-        // === TAMBAHAN DAILY JOIN (biar P2P) ===
+        // FIX BUILD: Dynamic import biar Vercel Ready
         try {
+          const Daily = (await import("@daily-co/daily-js")).default;
           const callObject = Daily.createCallObject();
           callRef.current = callObject;
           callObject.on("track-started", (e: any) => {
             if (e.participant.local) return;
             if (remoteVideoRef.current) {
-              // Tampilkan video / screen share lawan
               const existing = remoteVideoRef.current.srcObject as MediaStream;
               if (existing) {
-                // Hapus track lama sejenis
                 existing.getTracks().forEach(t => { if(t.kind === e.track.kind) existing.removeTrack(t); });
                 existing.addTrack(e.track);
               } else {
                 remoteVideoRef.current.srcObject = new MediaStream([e.track]);
               }
-              // Kalau yang datang adalah screen share, anggap lagi sharing
             }
           });
           callObject.on("participant-joined", () => {});
           callObject.on("error", (e:any) => console.log("Daily error", e));
-          // GANTI DOMAIN INI SESUAI PUNYA KAMU, kalau belum ada room akan auto error tapi fallback lokal tetap jalan
           const DAILY_DOMAIN = "https://penmeet.daily.co"; 
           await callObject.join({ 
             url: `${DAILY_DOMAIN}/${id}`,

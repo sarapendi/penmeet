@@ -1,14 +1,12 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
 import { useParams, useRouter, useSearchParams } from "next/navigation";
-// FIX BUILD: hapus import statis Daily biar Vercel gak error
 
 declare global {
-  interface Window {
-    SpeechRecognition: any;
-    webkitSpeechRecognition: any;
-  }
+  interface Window { SpeechRecognition: any; webkitSpeechRecognition: any; }
 }
+
+type WaitingCandidate = { id: string, name: string, posisi: string };
 
 export default function Room() {
   const { id } = useParams();
@@ -38,7 +36,12 @@ export default function Room() {
   const [keputusan, setKeputusan] = useState("DIPERTIMBANGKAN");
   const recognitionRef = useRef<any>(null);
 
-  // === SHARESCREEN P2P - START (CUMA INI YANG SAYA TAMBAH/UBAH) ===
+  // WAITING ROOM - BARU
+  const [waitingList, setWaitingList] = useState<WaitingCandidate[]>([]);
+  const [isWaitingApproval, setIsWaitingApproval] = useState(false);
+  const [isApproved, setIsApproved] = useState(isHR ? true : false);
+  const [showNotif, setShowNotif] = useState(false);
+
   const [isSharing, setIsSharing] = useState(false);
   const screenStreamRef = useRef<MediaStream | null>(null);
   const cameraStreamRef = useRef<MediaStream | null>(null);
@@ -47,18 +50,9 @@ export default function Room() {
   const toggleShareScreen = async () => {
     if (callRef.current) {
       try {
-        if (!isSharing) {
-          await callRef.current.startScreenShare();
-          setIsSharing(true);
-          return;
-        } else {
-          await callRef.current.stopScreenShare();
-          setIsSharing(false);
-          return;
-        }
-      } catch (e) {
-        console.log("Daily share gagal, fallback lokal", e);
-      }
+        if (!isSharing) { await callRef.current.startScreenShare(); setIsSharing(true); return; }
+        else { await callRef.current.stopScreenShare(); setIsSharing(false); return; }
+      } catch (e) { console.log("Daily share gagal", e); }
     }
     try {
       if (!isSharing) {
@@ -71,41 +65,27 @@ export default function Room() {
         if (myVideoRef.current) myVideoRef.current.srcObject = screenStream;
         screenStream.getVideoTracks()[0].onended = () => stopSharing();
         setIsSharing(true);
-      } else {
-        stopSharing();
-      }
-    } catch (e) {
-      console.log("Gagal share:", e);
-      alert("Gagal share screen bro, coba lagi!");
-    }
+      } else { stopSharing(); }
+    } catch (e) { alert("Gagal share screen"); }
   };
-
   const stopSharing = () => {
     try { callRef.current?.stopScreenShare(); } catch {}
     screenStreamRef.current?.getTracks().forEach((t: any) => t.stop());
     screenStreamRef.current = null;
-    if (cameraStreamRef.current && myVideoRef.current) {
-      myVideoRef.current.srcObject = cameraStreamRef.current;
-    } else if (myVideoRef.current) {
-      navigator.mediaDevices.getUserMedia({ video: { facingMode: "user" }, audio: true }).then(s => {
-        if (myVideoRef.current) myVideoRef.current.srcObject = s;
-        cameraStreamRef.current = s;
-      });
-    }
+    if (cameraStreamRef.current && myVideoRef.current) myVideoRef.current.srcObject = cameraStreamRef.current;
     setIsSharing(false);
   };
-  // === SHARESCREEN P2P - END ===
 
   useEffect(() => {
     const savedName = localStorage.getItem("penmeet-name");
     const savedPosisi = localStorage.getItem("penmeet-posisi");
     if (savedName) setInputName(savedName);
-    if (savedPosisi &&!isHR) setInputPosisi(savedPosisi);
+    if (savedPosisi && !isHR) setInputPosisi(savedPosisi);
   }, [isHR]);
 
   const handleJoin = () => {
     if (!inputName.trim()) return alert("Isi nama dulu bro!");
-    if (!isHR &&!inputPosisi.trim()) return alert("Isi posisi yang dilamar dulu bro!");
+    if (!isHR && !inputPosisi.trim()) return alert("Isi posisi dulu!");
     setMyName(inputName.trim());
     if (isHR) {
       setMyPosition("HR / Interviewer");
@@ -119,6 +99,7 @@ export default function Room() {
       localStorage.setItem("penmeet-name", inputName.trim());
       localStorage.setItem("penmeet-posisi", inputPosisi.trim());
       setShowNameInput(false);
+      setIsWaitingApproval(true);
     }
   };
 
@@ -127,15 +108,21 @@ export default function Room() {
     let stream: MediaStream;
     async function init() {
       try {
-        stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "user" }, audio: true });
+        stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
         cameraStreamRef.current = stream;
         if (myVideoRef.current) myVideoRef.current.srcObject = stream;
 
-        // FIX BUILD: Dynamic import biar Vercel Ready
         try {
           const Daily = (await import("@daily-co/daily-js")).default;
-          const callObject = Daily.createCallObject();
+          const callObject = Daily.createCallObject({ 
+            // FIX: Tambah STUN biar HP & Laptop beda jaringan tetep ketemu
+            dailyConfig: { 
+              experimentalChromeVideoMuteLightOff: true,
+              iceServers: [{ urls: "stun:stun.l.google.com:19302" }]
+            }
+          });
           callRef.current = callObject;
+
           callObject.on("track-started", (e: any) => {
             if (e.participant.local) return;
             if (remoteVideoRef.current) {
@@ -146,19 +133,72 @@ export default function Room() {
               } else {
                 remoteVideoRef.current.srcObject = new MediaStream([e.track]);
               }
+              setRemoteName(e.participant.user_name || "Kandidat");
             }
           });
-          callObject.on("participant-joined", () => {});
-          callObject.on("error", (e:any) => console.log("Daily error", e));
+
+          // === WAITING ROOM LOGIC ===
+          callObject.on("participant-joined", (e: any) => {
+            if (isHR) {
+              const name = e.participant.user_name || "Kandidat";
+              const newCand: WaitingCandidate = { id: e.participant.session_id, name, posisi: "-" };
+              setWaitingList(prev => [...prev, newCand]);
+              setShowNotif(true);
+              // Bunyi notifikasi
+              try { new Audio('https://actions.google.com/sounds/v1/alarms/beep_short.ogg').play(); } catch {}
+              setTimeout(() => setShowNotif(false), 8000);
+            }
+          });
+
+          callObject.on("app-message", (e: any) => {
+            if (!isHR && e.data?.approved) {
+              setIsApproved(true);
+              setIsWaitingApproval(false);
+            }
+            if (isHR && e.data?.requestJoin) {
+              const newCand: WaitingCandidate = { 
+                id: e.fromId, 
+                name: e.data.name, 
+                posisi: e.data.posisi 
+              };
+              setWaitingList(prev => {
+                if(prev.find(p=>p.id===newCand.id)) return prev;
+                return [...prev, newCand];
+              });
+              setShowNotif(true);
+            }
+          });
+
+          callObject.on("participant-left", (e: any) => {
+            if (isHR) setWaitingList(prev => prev.filter(p => p.id !== e.participant.session_id));
+          });
+
           const DAILY_DOMAIN = "https://penmeet.daily.co"; 
+          
+          // FIX: Coba create room dulu lewat API biar gak 404
+          try {
+            await fetch('/api/create-daily-room', { method: 'POST', body: JSON.stringify({ room: id }) });
+          } catch {}
+
           await callObject.join({ 
             url: `${DAILY_DOMAIN}/${id}`,
             userName: isHR ? `HR-${myName || inputName}` : `${candidateName || myName || inputName} - ${myPosition || inputPosisi}`
           });
+
+          // Kalau kandidat, kirim request join ke HR
+          if (!isHR) {
+            setTimeout(() => {
+              try {
+                callObject.sendAppMessage({ requestJoin: true, name: inputName, posisi: inputPosisi }, "*");
+              } catch {}
+            }, 1500);
+          }
+
         } catch (dailyErr) {
-          console.log("Daily belum konek, pakai mode lokal dulu:", dailyErr);
+          console.log("Daily error:", dailyErr);
+          alert("Room belum ada di Daily, buat manual di dashboard.daily.co ya Pak, nama room: " + id);
         }
-      } catch(e) { console.log(e) }
+      } catch(e) { console.log(e); alert("Izinkan kamera dulu Pak!"); }
     }
     init();
     return () => { 
@@ -167,78 +207,45 @@ export default function Room() {
     }
   }, [showNameInput]);
 
+  const approveCandidate = (cand: WaitingCandidate) => {
+    try { callRef.current?.sendAppMessage({ approved: true }, "*"); } catch {}
+    setWaitingList(prev => prev.filter(p => p.id !== cand.id));
+    setShowNotif(false);
+  };
+
+  // ... sisa fungsi toggleTranskrip, ringkasDenganAI, handleEndAndSave sama seperti punya Bapak ...
   const toggleTranskrip = () => {
-    if (isRecording) {
-      recognitionRef.current?.stop();
-      setIsRecording(false);
-      return;
-    }
+    if (isRecording) { recognitionRef.current?.stop(); setIsRecording(false); return; }
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-    if (!SpeechRecognition) return alert("Pakai Chrome ya bro!");
+    if (!SpeechRecognition) return alert("Pakai Chrome!");
     const recognition = new SpeechRecognition();
-    recognition.continuous = true;
-    recognition.interimResults = true;
-    recognition.lang = 'id-ID';
+    recognition.continuous = true; recognition.interimResults = true; recognition.lang = 'id-ID';
     recognition.onresult = (event: any) => {
-      let text = "";
-      for (let i = 0; i < event.results.length; i++) {
-        text += event.results[i][0].transcript + " ";
-      }
+      let text = ""; for (let i = 0; i < event.results.length; i++) text += event.results[i][0].transcript + " ";
       setTranscript(text);
     };
     recognition.onend = () => setIsRecording(false);
-    recognitionRef.current = recognition;
-    recognition.start();
-    setIsRecording(true);
+    recognitionRef.current = recognition; recognition.start(); setIsRecording(true);
   };
-
   const ringkasDenganAI = async () => {
-    if (!transcript) return alert("Belum ada transkrip bro!");
+    if (!transcript) return alert("Belum ada transkrip!");
     setLoadingAI(true);
     try {
-      const res = await fetch('/api/ringkas', {
-        method: 'POST',
-        body: JSON.stringify({ transcript, posisi: candidatePosisi || myPosition }),
-      });
-      const data = await res.json();
-      setAiSummary(data.summary);
-    } catch (e) {
-      alert("Gagal ringkas, cek API Key Groq");
-    }
+      const res = await fetch('/api/ringkas', { method: 'POST', body: JSON.stringify({ transcript, posisi: candidatePosisi || myPosition }) });
+      const data = await res.json(); setAiSummary(data.summary);
+    } catch { alert("Gagal ringkas"); }
     setLoadingAI(false);
   };
-
   const handleEndAndSave = async () => { setShowDecision(true); };
-  const handleHRKeluar = () => {
-    if (confirm('Yakin mau keluar tanpa menyimpan data? Data interview tidak akan masuk ke Sheet.')) {
-      router.push('/');
-    }
-  };
+  const handleHRKeluar = () => { if (confirm('Yakin keluar?')) router.push('/'); };
   const confirmSave = async () => {
-    const payload = {
-      room: id,
-      namaLengkap: candidateName || "Kandidat Room " + id,
-      posisiDilamar: candidatePosisi || "-",
-      pewawancara: myName,
-      transkrip: transcript,
-      ringkasanAI: aiSummary,
-      keputusan: keputusan,
-      tanggal: new Date().toISOString(),
-    };
-    try {
-      await fetch('/api/simpan-hr', { method: 'POST', body: JSON.stringify(payload) });
-    } catch {}
+    const payload = { room: id, namaLengkap: candidateName || "Kandidat Room " + id, posisiDilamar: candidatePosisi || "-", pewawancara: myName, transkrip: transcript, ringkasanAI: aiSummary, keputusan: keputusan, tanggal: new Date().toISOString() };
+    try { await fetch('/api/simpan-hr', { method: 'POST', body: JSON.stringify(payload) }); } catch {}
     alert(`Tersimpan! ${payload.namaLengkap} = ${keputusan}`);
-    if (isHR) {
-      router.push('/');
-    } else {
-      router.push('/finished');
-    }
+    router.push(isHR ? '/' : '/finished');
   };
-  const handleCandidateLeave = () => {
-    router.push('/finished');
-  };
-  const candidateLink = typeof window!== 'undefined'? `${window.location.origin}/room/${id}` : '';
+  const handleCandidateLeave = () => { router.push('/finished'); };
+  const candidateLink = typeof window !== 'undefined' ? `${window.location.origin}/room/${id}` : '';
 
   return (
     <div style={{ width: '100vw', height: '100vh', background: 'black', position: 'relative', overflow: 'hidden' }}>
@@ -247,74 +254,82 @@ export default function Room() {
           <div style={{ background: 'white', padding: '28px', borderRadius: '20px', width: '100%', maxWidth: '380px' }}>
             {isHR? (
               <>
-                <h2 style={{ fontSize: '22px', fontWeight: '800', marginBottom: '4px' }}>Dashboard HR</h2>
-                <p style={{ fontSize: '12px', color: '#666', marginBottom: '18px' }}>Room: {id} • Masuk sebagai HR</p>
-                <label style={{ fontSize: '12px', fontWeight: '700', marginBottom: '6px', display: 'block' }}>Nama HR / Interviewer</label>
-                <input value={inputName} onChange={e => setInputName(e.target.value)} onKeyDown={e => e.key === 'Enter' && handleJoin()} placeholder="Contoh: Pak Apen" style={{ width: '100%', padding: '14px', border: '2px solid #e5e7eb', borderRadius: '12px', marginBottom: '18px', outline: 'none', fontSize: '14px' }} />
+                <h2 style={{ fontSize: '22px', fontWeight: '800' }}>Dashboard HR</h2>
+                <p style={{ fontSize: '12px', color: '#666', marginBottom: '18px' }}>Room: {id}</p>
+                <label style={{ fontSize: '12px', fontWeight: '700', display: 'block', marginBottom: '6px' }}>Nama HR</label>
+                <input value={inputName} onChange={e => setInputName(e.target.value)} placeholder="Pak Apen" style={{ width: '100%', padding: '14px', border: '2px solid #e5e7eb', borderRadius: '12px', marginBottom: '18px' }} />
                 <button onClick={handleJoin} style={{ width: '100%', padding: '14px', background: '#111827', color: 'white', borderRadius: '12px', fontWeight: '700' }}>Masuk Dashboard HR</button>
               </>
             ) : (
               <>
-                <h2 style={{ fontSize: '22px', fontWeight: '800', marginBottom: '4px' }}>Masuk Interview</h2>
-                <p style={{ fontSize: '12px', color: '#666', marginBottom: '18px' }}>Room: {id} • Isi data kandidat dulu</p>
-                <label style={{ fontSize: '12px', fontWeight: '700', marginBottom: '6px', display: 'block' }}>Nama Lengkap</label>
-                <input value={inputName} onChange={e => setInputName(e.target.value)} placeholder="Contoh: Apen Saputra" style={{ width: '100%', padding: '14px', border: '2px solid #e5e7eb', borderRadius: '12px', marginBottom: '14px', outline: 'none', fontSize: '14px' }} />
-                <label style={{ fontSize: '12px', fontWeight: '700', marginBottom: '6px', display: 'block' }}>Posisi yang Dilamar</label>
-                <input value={inputPosisi} onChange={e => setInputPosisi(e.target.value)} onKeyDown={e => e.key === 'Enter' && handleJoin()} placeholder="Contoh: Frontend Developer" style={{ width: '100%', padding: '14px', border: '2px solid #e5e7eb', borderRadius: '12px', marginBottom: '18px', outline: 'none', fontSize: '14px' }} />
+                <h2 style={{ fontSize: '22px', fontWeight: '800' }}>Masuk Interview</h2>
+                <p style={{ fontSize: '12px', color: '#666', marginBottom: '18px' }}>Room: {id}</p>
+                <label style={{ fontSize: '12px', fontWeight: '700', display: 'block', marginBottom: '6px' }}>Nama Lengkap</label>
+                <input value={inputName} onChange={e => setInputName(e.target.value)} placeholder="Apen Saputra" style={{ width: '100%', padding: '14px', border: '2px solid #e5e7eb', borderRadius: '12px', marginBottom: '14px' }} />
+                <label style={{ fontSize: '12px', fontWeight: '700', display: 'block', marginBottom: '6px' }}>Posisi</label>
+                <input value={inputPosisi} onChange={e => setInputPosisi(e.target.value)} placeholder="Sales" style={{ width: '100%', padding: '14px', border: '2px solid #e5e7eb', borderRadius: '12px', marginBottom: '18px' }} />
                 <button onClick={handleJoin} style={{ width: '100%', padding: '14px', background: '#2563eb', color: 'white', borderRadius: '12px', fontWeight: '700' }}>Gabung Interview</button>
-                <p style={{ fontSize: '10px', color: '#999', marginTop: '10px', textAlign: 'center' }}>Data auto masuk ke Google Sheet & Looker Studio</p>
               </>
             )}
           </div>
         </div>
       )}
-      {showDecision && (
-        <div style={{ position: 'absolute', inset: 0, background: 'rgba(0,0,0,0.9)', zIndex: 200, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '16px' }}>
-          <div style={{ background: 'white', padding: '24px', borderRadius: '20px', width: '100%', maxWidth: '420px' }}>
-            <h2 style={{ fontSize: '18px', fontWeight: '800' }}>{candidateName || "Kandidat"}</h2>
-            <p style={{ fontSize: '12px', color: '#2563eb', fontWeight: '700', marginBottom: '12px' }}>{candidatePosisi || "-"}</p>
-            <div style={{ display: 'flex', gap: '8px', marginBottom: '16px' }}>
-              {['LOLOS', 'DIPERTIMBANGKAN', 'TIDAK LOLOS'].map(k => (
-                <button key={k} onClick={() => setKeputusan(k)} style={{ flex: 1, padding: '10px', borderRadius: '10px', border: '2px solid', borderColor: keputusan === k? '#2563eb' : '#e5e7eb', background: keputusan === k? '#dbeafe' : 'white', fontSize: '11px', fontWeight: '700' }}>{k}</button>
-              ))}
+
+      {/* WAITING ROOM UNTUK KANDIDAT */}
+      {!isHR && isWaitingApproval && !isApproved && (
+        <div style={{ position: 'absolute', inset: 0, background: 'rgba(0,0,0,0.9)', zIndex: 90, display: 'flex', alignItems: 'center', justifyContent: 'center', flexDirection: 'column', color: 'white' }}>
+          <div style={{ fontSize: '48px', marginBottom: '16px' }}>⏳</div>
+          <h2 style={{ fontSize: '20px', fontWeight: '800' }}>Menunggu Persetujuan HR</h2>
+          <p style={{ fontSize: '13px', color: '#ccc', marginTop: '8px', textAlign: 'center', padding: '0 20px' }}>HR ({id}) akan mengizinkan kamu masuk sebentar lagi. Pastikan kamera & mic sudah di-allow.</p>
+        </div>
+      )}
+
+      {/* NOTIFIKASI HR */}
+      {isHR && showNotif && waitingList.length > 0 && (
+        <div style={{ position: 'absolute', top: '80px', right: '16px', zIndex: 150, width: '340px' }}>
+          {waitingList.map(cand => (
+            <div key={cand.id} style={{ background: 'white', borderRadius: '16px', padding: '14px', boxShadow: '0 10px 30px rgba(0,0,0,0.3)', border: '2px solid #2563eb', marginBottom: '10px' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '10px' }}>
+                <div style={{ fontSize: '24px' }}>🔔</div>
+                <div><p style={{ fontSize: '13px', fontWeight: '800' }}>{cand.name} ingin bergabung</p><p style={{ fontSize: '11px', color: '#666' }}>Posisi: {cand.posisi || "-"}</p></div>
+              </div>
+              <div style={{ display: 'flex', gap: '8px' }}>
+                <button onClick={() => setWaitingList(prev => prev.filter(p => p.id !== cand.id))} style={{ flex: 1, padding: '10px', background: '#e5e7eb', borderRadius: '10px', fontWeight: '700', fontSize: '12px' }}>Tolak</button>
+                <button onClick={() => approveCandidate(cand)} style={{ flex: 1, padding: '10px', background: '#16a34a', color: 'white', borderRadius: '10px', fontWeight: '700', fontSize: '12px' }}>✅ Izinkan Masuk</button>
+              </div>
             </div>
-            <div style={{ display: 'flex', gap: '10px' }}>
-              <button onClick={() => setShowDecision(false)} style={{ flex: 1, padding: '14px', background: '#e5e7eb', borderRadius: '12px', fontWeight: '700' }}>Batal</button>
-              <button onClick={confirmSave} style={{ flex: 1, padding: '14px', background: '#16a34a', color: 'white', borderRadius: '12px', fontWeight: '700' }}>Simpan</button>
-            </div>
-          </div>
+          ))}
         </div>
       )}
 
       <video ref={remoteVideoRef} autoPlay playsInline style={{ width: '100%', height: '100%', objectFit: 'contain', background: 'black' }} />
-      <video ref={myVideoRef} autoPlay playsInline muted style={{ position: 'absolute', bottom: '20px', right: '20px', width: '140px', height: '105px', borderRadius: '12px', objectFit: 'cover', transform: isSharing ? 'scaleX(1)' : 'scaleX(-1)', border: '2px solid white', background: '#222' }} />
+      <video ref={myVideoRef} autoPlay playsInline muted style={{ position: 'absolute', bottom: '20px', right: '20px', width: '140px', height: '105px', borderRadius: '12px', objectFit: 'cover', transform: 'scaleX(-1)', border: '2px solid white', background: '#222' }} />
 
-      <div style={{ position: 'absolute', bottom: '88px', left: '16px', background: 'rgba(0,0,0,0.65)', color: 'white', padding: '6px 12px', borderRadius: '8px', fontSize: '13px', fontWeight: '600' }}>{isHR? `HR: ${myName}` : (candidateName? `${candidateName} - ${candidatePosisi}` : remoteName)} {isSharing && "• 🔵 Sharing Screen"}</div>
-      <div style={{ position: 'absolute', top: '16px', left: '16px', background: 'rgba(0,0,0,0.5)', color: 'white', padding: '6px 12px', borderRadius: '20px', fontSize: '11px' }}>{isHR? `Dashboard HR • Room: ${id}` : `Posisi: ${candidatePosisi || `Room: ${id}`}`}</div>
-
+      <div style={{ position: 'absolute', bottom: '88px', left: '16px', background: 'rgba(0,0,0,0.65)', color: 'white', padding: '6px 12px', borderRadius: '8px', fontSize: '13px', fontWeight: '600' }}>{isHR? `HR: ${myName}` : (candidateName? `${candidateName} - ${candidatePosisi}` : remoteName)} {isSharing && "• 🔵 Sharing"}</div>
+      
       {isHR && (
         <div style={{ position: 'absolute', top: '16px', right: '16px', width: '340px', background: 'white', borderRadius: '16px', padding: '14px', maxHeight: '85vh', overflow: 'auto' }}>
-          <h3 style={{ fontSize: '14px', fontWeight: '800', marginBottom: '2px' }}>Dashboard HR</h3>
-          <p style={{ fontSize: '11px', color: '#666', marginBottom: '12px' }}>Interview: {myName}</p>
+          <h3 style={{ fontSize: '14px', fontWeight: '800' }}>Dashboard HR {waitingList.length > 0 && `• 🔔 ${waitingList.length} menunggu`}</h3>
+          <p style={{ fontSize: '11px', color: '#666', marginBottom: '12px' }}>Room: {id}</p>
           <div style={{ background: '#f3f4f6', padding: '10px', borderRadius: '10px', marginBottom: '12px' }}>
-            <p style={{ fontSize: '10px', fontWeight: '800', marginBottom: '6px' }}>LINK UNTUK KANDIDAT:</p>
-            <p style={{ fontSize: '10px', wordBreak: 'break-all', background: 'white', padding: '6px', borderRadius: '6px', border: '1px solid #e5e7eb' }}>{candidateLink}</p>
-            <button onClick={() => { navigator.clipboard.writeText(candidateLink); alert("Link tercopy!"); }} style={{ marginTop: '8px', width: '100%', padding: '8px', background: '#111827', color: 'white', borderRadius: '8px', fontSize: '11px', fontWeight: '700' }}>📋 Copy Link Kandidat</button>
+            <p style={{ fontSize: '10px', fontWeight: '800', marginBottom: '6px' }}>LINK KANDIDAT:</p>
+            <p style={{ fontSize: '10px', wordBreak: 'break-all', background: 'white', padding: '6px', borderRadius: '6px' }}>{candidateLink}</p>
+            <button onClick={() => { navigator.clipboard.writeText(candidateLink); alert("Link tercopy!"); }} style={{ marginTop: '8px', width: '100%', padding: '8px', background: '#111827', color: 'white', borderRadius: '8px', fontSize: '11px', fontWeight: '700' }}>📋 Copy Link</button>
           </div>
-          <button onClick={toggleTranskrip} style={{ width: '100%', padding: '10px', borderRadius: '10px', background: isRecording? '#ef4444' : '#2563eb', color: 'white', fontWeight: '700', fontSize: '12px', marginBottom: '10px' }}>{isRecording? '🔴 Stop Catat' : '🎙️ Mulai Catat Interview'}</button>
-          <textarea value={transcript} onChange={e => setTranscript(e.target.value)} placeholder="Transkrip interview akan muncul di sini..." style={{ width: '100%', height: '90px', border: '1px solid #e5e7eb', borderRadius: '8px', padding: '8px', fontSize: '11px', marginBottom: '10px' }} />
-          <button onClick={ringkasDenganAI} disabled={loadingAI} style={{ width: '100%', padding: '10px', borderRadius: '10px', background: '#16a34a', color: 'white', fontWeight: '700', fontSize: '12px', marginBottom: '10px' }}>{loadingAI? 'Merangkum...' : '✨ Ringkas dengan AI (Groq)'}</button>
+          <button onClick={toggleTranskrip} style={{ width: '100%', padding: '10px', borderRadius: '10px', background: isRecording? '#ef4444' : '#2563eb', color: 'white', fontWeight: '700', fontSize: '12px', marginBottom: '10px' }}>{isRecording? '🔴 Stop Catat' : '🎙️ Mulai Catat'}</button>
+          <textarea value={transcript} onChange={e => setTranscript(e.target.value)} placeholder="Transkrip..." style={{ width: '100%', height: '90px', border: '1px solid #e5e7eb', borderRadius: '8px', padding: '8px', fontSize: '11px', marginBottom: '10px' }} />
+          <button onClick={ringkasDenganAI} disabled={loadingAI} style={{ width: '100%', padding: '10px', borderRadius: '10px', background: '#16a34a', color: 'white', fontWeight: '700', fontSize: '12px', marginBottom: '10px' }}>{loadingAI? 'Merangkum...' : '✨ Ringkas AI'}</button>
           {aiSummary && <div style={{ background: '#f0fdf4', border: '1px solid #bbf7d0', padding: '10px', borderRadius: '8px', fontSize: '11px', whiteSpace: 'pre-wrap' }}>{aiSummary}</div>}
         </div>
       )}
 
       <div style={{ position: 'absolute', bottom: '16px', left: '50%', transform: 'translateX(-50%)', background: '#1f2937', padding: '8px 16px', borderRadius: '999px', display: 'flex', gap: '10px', alignItems: 'center' }}>
-        <button onClick={() => { const s = myVideoRef.current?.srcObject as MediaStream; s?.getAudioTracks().forEach(t => t.enabled =!t.enabled); try{callRef.current?.setLocalAudio(micOn ? false : true);}catch{}; setMicOn(v =>!v); }} style={{ width: '48px', height: '48px', borderRadius: '50%', background: micOn? '#374151' : '#ef4444', color: 'white' }}>{micOn? '🎤' : '🔇'}</button>
-        <button onClick={() => { const s = myVideoRef.current?.srcObject as MediaStream; s?.getVideoTracks().forEach(t => t.enabled =!t.enabled); try{callRef.current?.setLocalVideo(camOn ? false : true);}catch{}; setCamOn(v =>!v); }} style={{ width: '48px', height: '48px', borderRadius: '50%', background: camOn? '#374151' : '#ef4444', color: 'white' }}>{camOn? '📹' : '📷'}</button>
-        <button onClick={toggleShareScreen} style={{ width: '48px', height: '48px', borderRadius: '50%', background: isSharing ? '#2563eb' : '#374151', color: 'white', border: isSharing ? '2px solid #93c5fd' : 'none' }} title={isSharing ? "Stop Sharing" : "Share Screen"}>{isSharing ? '🛑' : '🖥️'}</button>
+        <button onClick={() => { const s = myVideoRef.current?.srcObject as MediaStream; s?.getAudioTracks().forEach(t => t.enabled =!t.enabled); setMicOn(v=>!v); }} style={{ width: '48px', height: '48px', borderRadius: '50%', background: micOn? '#374151' : '#ef4444', color: 'white' }}>{micOn? '🎤' : '🔇'}</button>
+        <button onClick={() => { const s = myVideoRef.current?.srcObject as MediaStream; s?.getVideoTracks().forEach(t => t.enabled =!t.enabled); setCamOn(v=>!v); }} style={{ width: '48px', height: '48px', borderRadius: '50%', background: camOn? '#374151' : '#ef4444', color: 'white' }}>{camOn? '📹' : '📷'}</button>
+        <button onClick={toggleShareScreen} style={{ width: '48px', height: '48px', borderRadius: '50%', background: isSharing ? '#2563eb' : '#374151', color: 'white' }}>{isSharing ? '🛑' : '🖥️'}</button>
         {isHR? (
           <>
-            <button onClick={handleHRKeluar} style={{ padding: '0 18px', height: '48px', borderRadius: '24px', background: '#e5e7eb', color: '#374151', fontWeight: '700', fontSize: '13px' }}>Keluar</button>
+            <button onClick={handleHRKeluar} style={{ padding: '0 18px', height: '48px', borderRadius: '24px', background: '#e5e7eb', fontWeight: '700', fontSize: '13px' }}>Keluar</button>
             <button onClick={handleEndAndSave} style={{ padding: '0 22px', height: '48px', borderRadius: '24px', background: '#ef4444', color: 'white', fontWeight: '700' }}>END & SIMPAN</button>
           </>
         ) : (

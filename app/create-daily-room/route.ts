@@ -1,84 +1,18 @@
-import { NextRequest, NextResponse } from 'next/server'
-
+import { NextRequest, NextResponse } from "next/server";
 export async function POST(req: NextRequest) {
   try {
-    const body = await req.json()
-    const rawName = body.room || body.roomName
-    const roomName = String(rawName || "").trim().toLowerCase().replace(/\s+/g, '-')
-    
-    if (!roomName) {
-      return NextResponse.json({ error: 'roomName required' }, { status: 400 })
-    }
-
-    const apiKey = process.env.DAILY_API_KEY
-    if (!apiKey) {
-      return NextResponse.json({ error: 'DAILY_API_KEY not set di Vercel' }, { status: 500 })
-    }
-
-    // 1. Cek dulu
-    const checkRes = await fetch(`https://api.daily.co/v1/rooms/${roomName}`, {
-      headers: { Authorization: `Bearer ${apiKey}` },
-      cache: 'no-store'
-    })
-
-    if (checkRes.ok) {
-      const existData = await checkRes.json()
-      // FIX TAMBAHAN: Update room yang udah ada biar jadi public + no knocking
-      await fetch(`https://api.daily.co/v1/rooms/${roomName}`, {
-        method: 'POST',
-        headers: { 
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${apiKey}` 
-        },
-        body: JSON.stringify({
-          privacy: "public",
-          properties: {
-            enable_knocking: false,
-            enable_prejoin_ui: false,
-            enable_network_ui: false,
-            start_video_off: false,
-            start_audio_off: false,
-          }
-        })
-      })
-      return NextResponse.json({ message: 'Room exists', existed: true, name: roomName, url: existData.url })
-    }
-
-    // 2. Bikin baru
-    const createRes = await fetch('https://api.daily.co/v1/rooms', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${apiKey}`
-      },
-      body: JSON.stringify({
-        name: roomName,
-        privacy: "public",
-        properties: {
-          enable_chat: true,
-          enable_screenshare: true,
-          enable_recording: 'cloud',
-          enable_knocking: false,
-          enable_prejoin_ui: false,
-          enable_network_ui: false,
-          start_video_off: false,
-          start_audio_off: false,
-          max_participants: 10,
-          exp: Math.floor(Date.now() / 1000) + 60 * 60 * 24
-        }
-      })
-    })
-
-    const data = await createRes.json()
-    if (!createRes.ok) {
-      console.error("DAILY CREATE FAILED:", data)
-      return NextResponse.json({ error: data, name: roomName }, { status: 400 })
-    }
-
-    console.log("DAILY CREATE SUCCESS:", roomName)
-    return NextResponse.json({ message: 'Room created', created: true, name: roomName, data })
-  } catch (e: any) {
-    console.error("API ERROR:", e)
-    return NextResponse.json({ error: e.message }, { status: 500 })
-  }
+    const { room } = await req.json();
+    const roomName = room?.toString().trim().toLowerCase().replace(/[^a-z0-9-]/g, '-') || "penmeet";
+    const apiKey = process.env.DAILY_API_KEY;
+    if (!apiKey) return NextResponse.json({ error: "KEY KOSONG" }, { status: 500 });
+    const headers: any = { "Content-Type": "application/json", "Authorization": `Bearer ${apiKey}` };
+    const getRes = await fetch(`https://api.daily.co/v1/rooms/${roomName}`, { headers });
+    if (getRes.ok) return NextResponse.json({ ok: true });
+    const createRes = await fetch("https://api.daily.co/v1/rooms", {
+      method: "POST", headers,
+      body: JSON.stringify({ name: roomName, privacy: "public", properties: { enable_knocking: false, enable_prejoin_ui: false, enable_screenshare: true, exp: Math.round(Date.now()/1000)+86400 } })
+    });
+    const data = await createRes.json();
+    return NextResponse.json({ ok: createRes.ok, data });
+  } catch (e: any) { return NextResponse.json({ error: e.message }, { status: 500 }); }
 }

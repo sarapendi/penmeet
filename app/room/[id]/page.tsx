@@ -137,7 +137,7 @@ export default function Room() {
         setStatus("Membuat room di Daily...");
         for (let attempt = 0; attempt < 2; attempt++) {
           try {
-            const res = await fetch('/api/create-daily-room', { 
+            const res = await fetch('/create-daily-room', { 
               method: 'POST', 
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ room: roomNameFix }) 
@@ -171,7 +171,7 @@ export default function Room() {
           });
         }, 1000);
 
-      } catch(e) { console.log(e); alert("Izinkan kamera dulu Pak!"); setStatus("Error kamera"); }
+      } catch(e) { console.log(e); /create-daisetStatus("Error: " + ((e as any)?.message || e));ly-room }
     }
     init();
     return () => { 

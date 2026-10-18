@@ -89,7 +89,8 @@ export default function Room() {
     let stream: MediaStream;
     async function init() {
       try {
-        stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+        // 1. Ambil kamera dulu biar preview lokal nyala
+        stream = await navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480 }, audio: true });
         cameraStreamRef.current = stream;
         if (myVideoRef.current) {
           myVideoRef.current.srcObject = stream;
@@ -97,48 +98,74 @@ export default function Room() {
         }
 
         const Daily = (await import("@daily-co/daily-js")).default;
-        const callObject = Daily.createCallObject();
+        const callObject = Daily.createCallObject({ audioSource: stream.getAudioTracks()[0], videoSource: stream.getVideoTracks()[0] });
         callRef.current = callObject;
 
-        // FIX UTAMA BIAR GAK HITAM
+        // === FIX UTAMA BIAR GAK HITAM - VERSI PALING KUAT ===
         const attachParticipant = (p: any) => {
           if (!p || p.local) return;
-          const vTrack = p.tracks?.video?.persistentTrack || p.tracks?.video?.track;
-          const aTrack = p.tracks?.audio?.persistentTrack || p.tracks?.audio?.track;
-          if ((vTrack || aTrack) && remoteVideoRef.current) {
-            let ms = remoteVideoRef.current.srcObject as MediaStream;
-            if (!ms) ms = new MediaStream();
-            if (vTrack) {
-              ms.getVideoTracks().forEach(t => ms.removeTrack(t));
-              ms.addTrack(vTrack);
-            }
-            if (aTrack) {
-              ms.getAudioTracks().forEach(t => ms.removeTrack(t));
-              ms.addTrack(aTrack);
-            }
-            remoteVideoRef.current.srcObject = ms;
-            remoteVideoRef.current.play().then(()=> {
-              setRemoteName(p.user_name || "Tersambung");
-              setStatus(`✅ Tersambung: ${p.user_name}`);
-            }).catch(()=>{});
+          console.log("ATTACH:", p.user_name, p.tracks);
+          
+          // Pastikan remote video ada
+          if (!remoteVideoRef.current) return;
+          
+          // Buat MediaStream baru kalau belum ada
+          let remoteStream = remoteVideoRef.current.srcObject as MediaStream;
+          if (!remoteStream) {
+            remoteStream = new MediaStream();
+            remoteVideoRef.current.srcObject = remoteStream;
           }
+
+          // VIDEO TRACK - pakai persistentTrack itu kuncinya!
+          const videoTrack = p.tracks?.video?.persistentTrack || p.tracks?.video?.track;
+          if (videoTrack && p.tracks?.video?.state === 'playable') {
+            // Hapus track video lama
+            remoteStream.getVideoTracks().forEach(t => remoteStream!.removeTrack(t));
+            remoteStream.addTrack(videoTrack);
+            console.log("VIDEO TRACK ATTACHED:", p.user_name);
+          }
+
+          // AUDIO TRACK
+          const audioTrack = p.tracks?.audio?.persistentTrack || p.tracks?.audio?.track;
+          if (audioTrack && p.tracks?.audio?.state === 'playable') {
+            remoteStream.getAudioTracks().forEach(t => remoteStream!.removeTrack(t));
+            remoteStream.addTrack(audioTrack);
+          }
+
+          // PLAY
+          remoteVideoRef.current.play().then(()=> {
+            setRemoteName(p.user_name || "Tersambung");
+            setStatus(`✅ Tersambung: ${p.user_name}`);
+          }).catch((e)=>{ console.log("play error", e); });
         };
 
-        callObject.on("track-started", (e: any) => attachParticipant(e.participant));
+        // Event yang paling penting biar gak hitam
+        callObject.on("track-started", (e: any) => {
+          console.log("track-started", e);
+          attachParticipant(e.participant);
+        });
         callObject.on("participant-joined", (e: any) => {
+          console.log("participant-joined", e);
           setStatus(`🔔 ${e.participant.user_name} masuk...`);
           setShowNotif(true);
-          setTimeout(()=> attachParticipant(e.participant), 300);
-          setTimeout(()=> attachParticipant(e.participant), 1000);
-          setTimeout(()=> attachParticipant(e.participant), 2000);
+          // Retry attach 3x biar pasti nempel
+          setTimeout(()=> attachParticipant(e.participant), 500);
+          setTimeout(()=> attachParticipant(e.participant), 1500);
+          setTimeout(()=> attachParticipant(e.participant), 3000);
           setTimeout(()=> setShowNotif(false), 4000);
         });
-        callObject.on("participant-updated", (e: any) => attachParticipant(e.participant));
+        callObject.on("participant-updated", (e: any) => {
+          console.log("participant-updated", e);
+          attachParticipant(e.participant);
+        });
+        callObject.on("track-stopped", (e: any) => {
+          console.log("track-stopped", e);
+        });
 
         const DAILY_DOMAIN = "https://penmeet.daily.co"; 
         const roomNameFix = String(id).trim().toLowerCase().replace(/\s+/g, '-');
         
-        // === AUTO CREATE DAILY YANG BARU, LEBIH KUAT ===
+        // === AUTO CREATE DAILY YANG BARU, LEBIH KUAT + RETRY ===
         setStatus("Membuat room di Daily...");
         for (let attempt = 0; attempt < 3; attempt++) {
           try {
@@ -148,12 +175,13 @@ export default function Room() {
               body: JSON.stringify({ room: roomNameFix }) 
             });
             const json = await res.json();
-            console.log("AUTO CREATE RESULT:", json);
+            console.log("AUTO CREATE RESULT ATTEMPT", attempt, json);
             if (res.ok) break;
+            if (json.message === 'Room exists') break;
           } catch (err) { console.log("auto create retry", attempt, err); }
           await new Promise(r => setTimeout(r, 1000));
         }
-        await new Promise(r => setTimeout(r, 1500));
+        await new Promise(r => setTimeout(r, 2000));
         // === END AUTO CREATE ===
 
         setStatus("Join room...");
@@ -163,12 +191,14 @@ export default function Room() {
         });
         setStatus("Menunggu lawan join...");
 
+        // Force cek participant yang udah ada
         setTimeout(() => {
           const parts = callObject.participants();
+          console.log("PARTICIPANTS NOW:", parts);
           Object.values(parts).forEach((p: any) => { if (!p.local) attachParticipant(p); });
-        }, 1000);
+        }, 1500);
 
-      } catch(e) { console.log(e); alert("Izinkan kamera dulu Pak!"); }
+      } catch(e) { console.log(e); alert("Izinkan kamera dulu Pak!"); setStatus("Error kamera"); }
     }
     init();
     return () => { 
@@ -238,7 +268,9 @@ export default function Room() {
         </div>
       )}
 
+      {/* REMOTE VIDEO - INI YANG TADI HITAM */}
       <video ref={remoteVideoRef} autoPlay playsInline style={{ width: '100%', height: '100%', objectFit: 'contain', background: '#0a0a0a' }} />
+      {/* MY VIDEO KECIL */}
       <video ref={myVideoRef} autoPlay playsInline muted style={{ position: 'absolute', bottom: '90px', right: '20px', width: '140px', height: '105px', borderRadius: '12px', objectFit: 'cover', transform: 'scaleX(-1)', border: '2px solid white', background: '#222', zIndex: 10 }} />
 
       <div style={{ position: 'absolute', top: '12px', left: '12px', background: 'rgba(0,0,0,0.7)', color: 'white', padding: '6px 12px', borderRadius: '8px', fontSize: '12px', zIndex: 20 }}>{status} - {remoteName} {isSharing && "• Sharing"}</div>

@@ -3,7 +3,6 @@ import { NextRequest, NextResponse } from 'next/server'
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json()
-    // AUTO FIX: bikin lowercase dan hapus spasi biar Daily gak error
     const rawName = body.room || body.roomName
     const roomName = String(rawName || "").trim().toLowerCase().replace(/\s+/g, '-')
     
@@ -16,7 +15,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'DAILY_API_KEY not set di Vercel' }, { status: 500 })
     }
 
-    // 1. Cek dulu udah ada belum di Daily
+    // 1. Cek dulu
     const checkRes = await fetch(`https://api.daily.co/v1/rooms/${roomName}`, {
       headers: { Authorization: `Bearer ${apiKey}` },
       cache: 'no-store'
@@ -24,10 +23,28 @@ export async function POST(req: NextRequest) {
 
     if (checkRes.ok) {
       const existData = await checkRes.json()
+      // FIX TAMBAHAN: Update room yang udah ada biar jadi public + no knocking
+      await fetch(`https://api.daily.co/v1/rooms/${roomName}`, {
+        method: 'POST',
+        headers: { 
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${apiKey}` 
+        },
+        body: JSON.stringify({
+          privacy: "public",
+          properties: {
+            enable_knocking: false,
+            enable_prejoin_ui: false,
+            enable_network_ui: false,
+            start_video_off: false,
+            start_audio_off: false,
+          }
+        })
+      })
       return NextResponse.json({ message: 'Room exists', existed: true, name: roomName, url: existData.url })
     }
 
-    // 2. Kalau belum ada, BIKIN OTOMATIS - INI INTINYA AUTO CREATE
+    // 2. Bikin baru
     const createRes = await fetch('https://api.daily.co/v1/rooms', {
       method: 'POST',
       headers: {
@@ -36,16 +53,18 @@ export async function POST(req: NextRequest) {
       },
       body: JSON.stringify({
         name: roomName,
-        privacy: "public", // WAJIB public biar bisa join tanpa token
+        privacy: "public",
         properties: {
           enable_chat: true,
           enable_screenshare: true,
           enable_recording: 'cloud',
           enable_knocking: false,
+          enable_prejoin_ui: false,
+          enable_network_ui: false,
           start_video_off: false,
           start_audio_off: false,
           max_participants: 10,
-          exp: Math.floor(Date.now() / 1000) + 60 * 60 * 24 // expired 24 jam
+          exp: Math.floor(Date.now() / 1000) + 60 * 60 * 24
         }
       })
     })

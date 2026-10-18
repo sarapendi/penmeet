@@ -103,22 +103,17 @@ export default function Room() {
         // FIX UTAMA BIAR GAK HITAM
         const attachParticipant = (p: any) => {
           if (!p || p.local) return;
-          console.log("attach", p.user_name, p.tracks);
           const vTrack = p.tracks?.video?.persistentTrack || p.tracks?.video?.track;
           const aTrack = p.tracks?.audio?.persistentTrack || p.tracks?.audio?.track;
-          
           if ((vTrack || aTrack) && remoteVideoRef.current) {
             let ms = remoteVideoRef.current.srcObject as MediaStream;
             if (!ms) ms = new MediaStream();
-            
             if (vTrack) {
-              const oldV = ms.getVideoTracks();
-              oldV.forEach(t => ms.removeTrack(t));
+              ms.getVideoTracks().forEach(t => ms.removeTrack(t));
               ms.addTrack(vTrack);
             }
             if (aTrack) {
-              const oldA = ms.getAudioTracks();
-              oldA.forEach(t => ms.removeTrack(t));
+              ms.getAudioTracks().forEach(t => ms.removeTrack(t));
               ms.addTrack(aTrack);
             }
             remoteVideoRef.current.srcObject = ms;
@@ -129,13 +124,8 @@ export default function Room() {
           }
         };
 
-        callObject.on("track-started", (e: any) => {
-          console.log("track-started", e.track.kind, e.participant.user_name);
-          attachParticipant(e.participant);
-        });
-
+        callObject.on("track-started", (e: any) => attachParticipant(e.participant));
         callObject.on("participant-joined", (e: any) => {
-          console.log("joined", e.participant.user_name);
           setStatus(`🔔 ${e.participant.user_name} masuk...`);
           setShowNotif(true);
           setTimeout(()=> attachParticipant(e.participant), 300);
@@ -143,35 +133,39 @@ export default function Room() {
           setTimeout(()=> attachParticipant(e.participant), 2000);
           setTimeout(()=> setShowNotif(false), 4000);
         });
-
-        callObject.on("participant-updated", (e: any) => {
-          attachParticipant(e.participant);
-        });
+        callObject.on("participant-updated", (e: any) => attachParticipant(e.participant));
 
         const DAILY_DOMAIN = "https://penmeet.daily.co"; 
+        const roomNameFix = String(id).trim().toLowerCase().replace(/\s+/g, '-');
         
-        try {
-          await fetch('/api/create-daily-room', { 
-            method: 'POST', 
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ room: id }) 
-          });
-          await new Promise(r => setTimeout(r, 800));
-        } catch (err) {}
+        // === AUTO CREATE DAILY YANG BARU, LEBIH KUAT ===
+        setStatus("Membuat room di Daily...");
+        for (let attempt = 0; attempt < 3; attempt++) {
+          try {
+            const res = await fetch('/api/create-daily-room', { 
+              method: 'POST', 
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ room: roomNameFix }) 
+            });
+            const json = await res.json();
+            console.log("AUTO CREATE RESULT:", json);
+            if (res.ok) break;
+          } catch (err) { console.log("auto create retry", attempt, err); }
+          await new Promise(r => setTimeout(r, 1000));
+        }
+        await new Promise(r => setTimeout(r, 1500));
+        // === END AUTO CREATE ===
 
         setStatus("Join room...");
         await callObject.join({ 
-          url: `${DAILY_DOMAIN}/${id}`,
+          url: `${DAILY_DOMAIN}/${roomNameFix}`,
           userName: isHR ? `HR-${myName || inputName}` : `${candidateName || myName || inputName} - ${myPosition || inputPosisi}`
         });
         setStatus("Menunggu lawan join...");
 
-        // Cek yang sudah ada di room
         setTimeout(() => {
           const parts = callObject.participants();
-          Object.values(parts).forEach((p: any) => {
-            if (!p.local) attachParticipant(p);
-          });
+          Object.values(parts).forEach((p: any) => { if (!p.local) attachParticipant(p); });
         }, 1000);
 
       } catch(e) { console.log(e); alert("Izinkan kamera dulu Pak!"); }

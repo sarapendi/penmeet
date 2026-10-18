@@ -6,8 +6,6 @@ declare global {
   interface Window { SpeechRecognition: any; webkitSpeechRecognition: any; }
 }
 
-type WaitingCandidate = { id: string, name: string, posisi: string };
-
 export default function Room() {
   const { id } = useParams();
   const router = useRouter();
@@ -37,25 +35,16 @@ export default function Room() {
   const [keputusan, setKeputusan] = useState("DIPERTIMBANGKAN");
   const recognitionRef = useRef<any>(null);
 
-  const [waitingList, setWaitingList] = useState<WaitingCandidate[]>([]);
-  const [showNotif, setShowNotif] = useState(false);
-
   const [isSharing, setIsSharing] = useState(false);
-  const screenStreamRef = useRef<MediaStream | null>(null);
   const cameraStreamRef = useRef<MediaStream | null>(null);
   const callRef = useRef<any>(null);
 
   const toggleShareScreen = async () => {
-    if (callRef.current) {
-      try {
-        if (!isSharing) { await callRef.current.startScreenShare(); setIsSharing(true); return; }
-        else { await callRef.current.stopScreenShare(); setIsSharing(false); return; }
-      } catch (e) { console.log("Daily share gagal", e); }
-    }
-  };
-  const stopSharing = () => {
-    try { callRef.current?.stopScreenShare(); } catch {}
-    setIsSharing(false);
+    if (!callRef.current) return;
+    try {
+      if (!isSharing) { await callRef.current.startScreenShare(); setIsSharing(true); }
+      else { await callRef.current.stopScreenShare(); setIsSharing(false); }
+    } catch (e) { console.log(e); }
   };
 
   useEffect(() => {
@@ -89,85 +78,64 @@ export default function Room() {
     let stream: MediaStream;
     async function init() {
       try {
-        // 1. Ambil kamera dulu biar preview lokal nyala
-        stream = await navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480 }, audio: true });
+        stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
         cameraStreamRef.current = stream;
         if (myVideoRef.current) {
           myVideoRef.current.srcObject = stream;
-          myVideoRef.current.play().catch(()=>{});
+          await myVideoRef.current.play().catch(()=>{});
         }
 
         const Daily = (await import("@daily-co/daily-js")).default;
-        const callObject = Daily.createCallObject({ audioSource: stream.getAudioTracks()[0], videoSource: stream.getVideoTracks()[0] });
+        const callObject = Daily.createCallObject();
         callRef.current = callObject;
 
-        // === FIX UTAMA BIAR GAK HITAM - VERSI PALING KUAT ===
-        const attachParticipant = (p: any) => {
-          if (!p || p.local) return;
-          console.log("ATTACH:", p.user_name, p.tracks);
-          
-          // Pastikan remote video ada
-          if (!remoteVideoRef.current) return;
-          
-          // Buat MediaStream baru kalau belum ada
-          let remoteStream = remoteVideoRef.current.srcObject as MediaStream;
-          if (!remoteStream) {
-            remoteStream = new MediaStream();
-            remoteVideoRef.current.srcObject = remoteStream;
+        // === FIX UTAMA ANTI HITAM ===
+        const ensureRemoteStream = () => {
+          if (!remoteVideoRef.current) return null;
+          let ms = remoteVideoRef.current.srcObject as MediaStream;
+          if (!ms) {
+            ms = new MediaStream();
+            remoteVideoRef.current.srcObject = ms;
           }
-
-          // VIDEO TRACK - pakai persistentTrack itu kuncinya!
-          const videoTrack = p.tracks?.video?.persistentTrack || p.tracks?.video?.track;
-          if (videoTrack && p.tracks?.video?.state === 'playable') {
-            // Hapus track video lama
-            remoteStream.getVideoTracks().forEach(t => remoteStream!.removeTrack(t));
-            remoteStream.addTrack(videoTrack);
-            console.log("VIDEO TRACK ATTACHED:", p.user_name);
-          }
-
-          // AUDIO TRACK
-          const audioTrack = p.tracks?.audio?.persistentTrack || p.tracks?.audio?.track;
-          if (audioTrack && p.tracks?.audio?.state === 'playable') {
-            remoteStream.getAudioTracks().forEach(t => remoteStream!.removeTrack(t));
-            remoteStream.addTrack(audioTrack);
-          }
-
-          // PLAY
-          remoteVideoRef.current.play().then(()=> {
-            setRemoteName(p.user_name || "Tersambung");
-            setStatus(`✅ Tersambung: ${p.user_name}`);
-          }).catch((e)=>{ console.log("play error", e); });
+          return ms;
         };
 
-        // Event yang paling penting biar gak hitam
         callObject.on("track-started", (e: any) => {
-          console.log("track-started", e);
-          attachParticipant(e.participant);
+          console.log("track-started", e.type, e.participant?.user_name);
+          if (!e.participant || e.participant.local) return;
+          if (!e.track) return;
+          const ms = ensureRemoteStream();
+          if (!ms) return;
+          const track = e.track.persistentTrack || e.track.track || e.track;
+          if (e.type === 'video') {
+            ms.getVideoTracks().forEach(t => ms.removeTrack(t));
+            ms.addTrack(track);
+            remoteVideoRef.current?.play().then(()=>{
+              setRemoteName(e.participant.user_name || "Tersambung");
+              setStatus(`✅ Tersambung: ${e.participant.user_name}`);
+            }).catch(()=>{});
+          }
+          if (e.type === 'audio') {
+            ms.getAudioTracks().forEach(t => ms.removeTrack(t));
+            ms.addTrack(track);
+          }
         });
+
         callObject.on("participant-joined", (e: any) => {
-          console.log("participant-joined", e);
-          setStatus(`🔔 ${e.participant.user_name} masuk...`);
-          setShowNotif(true);
-          // Retry attach 3x biar pasti nempel
-          setTimeout(()=> attachParticipant(e.participant), 500);
-          setTimeout(()=> attachParticipant(e.participant), 1500);
-          setTimeout(()=> attachParticipant(e.participant), 3000);
-          setTimeout(()=> setShowNotif(false), 4000);
+          console.log("joined", e.participant.user_name);
+          setStatus(`🔔 ${e.participant.user_name} masuk`);
         });
-        callObject.on("participant-updated", (e: any) => {
-          console.log("participant-updated", e);
-          attachParticipant(e.participant);
-        });
-        callObject.on("track-stopped", (e: any) => {
-          console.log("track-stopped", e);
+        
+        callObject.on("participant-left", () => {
+          setStatus("Peserta keluar");
+          setRemoteName("Menunggu...");
         });
 
         const DAILY_DOMAIN = "https://penmeet.daily.co"; 
         const roomNameFix = String(id).trim().toLowerCase().replace(/\s+/g, '-');
         
-        // === AUTO CREATE DAILY YANG BARU, LEBIH KUAT + RETRY ===
         setStatus("Membuat room di Daily...");
-        for (let attempt = 0; attempt < 3; attempt++) {
+        for (let attempt = 0; attempt < 2; attempt++) {
           try {
             const res = await fetch('/api/create-daily-room', { 
               method: 'POST', 
@@ -175,14 +143,12 @@ export default function Room() {
               body: JSON.stringify({ room: roomNameFix }) 
             });
             const json = await res.json();
-            console.log("AUTO CREATE RESULT ATTEMPT", attempt, json);
-            if (res.ok) break;
-            if (json.message === 'Room exists') break;
-          } catch (err) { console.log("auto create retry", attempt, err); }
-          await new Promise(r => setTimeout(r, 1000));
+            console.log("create", json);
+            if (res.ok || json.message === 'Room exists') break;
+          } catch {}
+          await new Promise(r => setTimeout(r, 800));
         }
-        await new Promise(r => setTimeout(r, 2000));
-        // === END AUTO CREATE ===
+        await new Promise(r => setTimeout(r, 1000));
 
         setStatus("Join room...");
         await callObject.join({ 
@@ -191,12 +157,19 @@ export default function Room() {
         });
         setStatus("Menunggu lawan join...");
 
-        // Force cek participant yang udah ada
+        // cek participant yang sudah ada
         setTimeout(() => {
           const parts = callObject.participants();
-          console.log("PARTICIPANTS NOW:", parts);
-          Object.values(parts).forEach((p: any) => { if (!p.local) attachParticipant(p); });
-        }, 1500);
+          Object.values(parts).forEach((p: any) => {
+            if (p.local) return;
+            const vTrack = p.tracks?.video?.persistentTrack;
+            const aTrack = p.tracks?.audio?.persistentTrack;
+            const ms = ensureRemoteStream();
+            if (vTrack && ms) { ms.getVideoTracks().forEach(t=>ms.removeTrack(t)); ms.addTrack(vTrack); remoteVideoRef.current?.play(); }
+            if (aTrack && ms) { ms.getAudioTracks().forEach(t=>ms.removeTrack(t)); ms.addTrack(aTrack); }
+            if (vTrack) { setRemoteName(p.user_name); setStatus(`✅ Tersambung: ${p.user_name}`); }
+          });
+        }, 1000);
 
       } catch(e) { console.log(e); alert("Izinkan kamera dulu Pak!"); setStatus("Error kamera"); }
     }
@@ -267,17 +240,12 @@ export default function Room() {
           </div>
         </div>
       )}
-
-      {/* REMOTE VIDEO - INI YANG TADI HITAM */}
       <video ref={remoteVideoRef} autoPlay playsInline style={{ width: '100%', height: '100%', objectFit: 'contain', background: '#0a0a0a' }} />
-      {/* MY VIDEO KECIL */}
       <video ref={myVideoRef} autoPlay playsInline muted style={{ position: 'absolute', bottom: '90px', right: '20px', width: '140px', height: '105px', borderRadius: '12px', objectFit: 'cover', transform: 'scaleX(-1)', border: '2px solid white', background: '#222', zIndex: 10 }} />
-
-      <div style={{ position: 'absolute', top: '12px', left: '12px', background: 'rgba(0,0,0,0.7)', color: 'white', padding: '6px 12px', borderRadius: '8px', fontSize: '12px', zIndex: 20 }}>{status} - {remoteName} {isSharing && "• Sharing"}</div>
-      
+      <div style={{ position: 'absolute', top: '12px', left: '12px', background: 'rgba(0,0,0,0.7)', color: 'white', padding: '6px 12px', borderRadius: '8px', fontSize: '12px', zIndex: 20 }}>{status} - {remoteName}</div>
       {isHR && (
         <div style={{ position: 'absolute', top: '50px', right: '16px', width: '340px', background: 'white', borderRadius: '16px', padding: '14px', maxHeight: '85vh', overflow: 'auto', zIndex: 20 }}>
-          <h3 style={{ fontSize: '14px', fontWeight: '800' }}>Dashboard HR {showNotif && "• 🟢 JOIN!"}</h3>
+          <h3 style={{ fontSize: '14px', fontWeight: '800' }}>Dashboard HR</h3>
           <p style={{ fontSize: '11px', color: '#666', marginBottom: '12px' }}>Room: {id}</p>
           <div style={{ background: '#f3f4f6', padding: '10px', borderRadius: '10px', marginBottom: '12px' }}>
             <p style={{ fontSize: '10px', fontWeight: '800', marginBottom: '6px' }}>LINK KANDIDAT:</p>
@@ -290,10 +258,9 @@ export default function Room() {
           {aiSummary && <div style={{ background: '#f0fdf4', border: '1px solid #bbf7d0', padding: '10px', borderRadius: '8px', fontSize: '11px', whiteSpace: 'pre-wrap' }}>{aiSummary}</div>}
         </div>
       )}
-
       <div style={{ position: 'absolute', bottom: '16px', left: '50%', transform: 'translateX(-50%)', background: '#1f2937', padding: '8px 16px', borderRadius: '999px', display: 'flex', gap: '10px', alignItems: 'center', zIndex: 30 }}>
-        <button onClick={() => { const s = myVideoRef.current?.srcObject as MediaStream; s?.getAudioTracks().forEach(t => t.enabled =!t.enabled); setMicOn(v=>!v); }} style={{ width: '48px', height: '48px', borderRadius: '50%', background: micOn? '#374151' : '#ef4444', color: 'white' }}>{micOn? '🎤' : '🔇'}</button>
-        <button onClick={() => { const s = myVideoRef.current?.srcObject as MediaStream; s?.getVideoTracks().forEach(t => t.enabled =!t.enabled); setCamOn(v=>!v); }} style={{ width: '48px', height: '48px', borderRadius: '50%', background: camOn? '#374151' : '#ef4444', color: 'white' }}>{camOn? '📹' : '📷'}</button>
+        <button onClick={() => { const s = cameraStreamRef.current; s?.getAudioTracks().forEach(t => t.enabled =!t.enabled); setMicOn(v=>!v); }} style={{ width: '48px', height: '48px', borderRadius: '50%', background: micOn? '#374151' : '#ef4444', color: 'white' }}>{micOn? '🎤' : '🔇'}</button>
+        <button onClick={() => { const s = cameraStreamRef.current; s?.getVideoTracks().forEach(t => t.enabled =!t.enabled); setCamOn(v=>!v); }} style={{ width: '48px', height: '48px', borderRadius: '50%', background: camOn? '#374151' : '#ef4444', color: 'white' }}>{camOn? '📹' : '📷'}</button>
         <button onClick={toggleShareScreen} style={{ width: '48px', height: '48px', borderRadius: '50%', background: isSharing ? '#2563eb' : '#374151', color: 'white' }}>{isSharing ? '🛑' : '🖥️'}</button>
         {isHR? (
           <>
@@ -304,7 +271,6 @@ export default function Room() {
           <button onClick={handleCandidateLeave} style={{ padding: '0 22px', height: '48px', borderRadius: '24px', background: '#111827', color: 'white', fontWeight: '700' }}>Selesai</button>
         )}
       </div>
-
       {showDecision && (
         <div style={{ position: 'absolute', inset: 0, background: 'rgba(0,0,0,0.9)', zIndex: 200, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
           <div style={{ background: 'white', padding: '24px', borderRadius: '16px', width: '320px' }}>

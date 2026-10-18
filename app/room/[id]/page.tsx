@@ -7,7 +7,8 @@ declare global {
 }
 
 export default function Room() {
-  const { id } = useParams();
+  const params = useParams();
+  const roomName = (params.roomName as string) || (params.id as string) || "penmeet";
   const router = useRouter();
   const searchParams = useSearchParams();
   const isHR = searchParams.get("role") === "hr";
@@ -34,9 +35,7 @@ export default function Room() {
   const [showDecision, setShowDecision] = useState(false);
   const [keputusan, setKeputusan] = useState("DIPERTIMBANGKAN");
   const recognitionRef = useRef<any>(null);
-
   const [isSharing, setIsSharing] = useState(false);
-  const cameraStreamRef = useRef<MediaStream | null>(null);
   const callRef = useRef<any>(null);
 
   const toggleShareScreen = async () => {
@@ -75,38 +74,46 @@ export default function Room() {
 
   useEffect(() => {
     if (showNameInput) return;
-    let stream: MediaStream;
+    let mounted = true;
     async function init() {
       try {
-        stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
-        cameraStreamRef.current = stream;
-        if (myVideoRef.current) {
-          myVideoRef.current.srcObject = stream;
-          await myVideoRef.current.play().catch(()=>{});
-        }
-
         const Daily = (await import("@daily-co/daily-js")).default;
         const callObject = Daily.createCallObject();
         callRef.current = callObject;
 
-        // === FIX UTAMA ANTI HITAM ===
         const ensureRemoteStream = () => {
           if (!remoteVideoRef.current) return null;
           let ms = remoteVideoRef.current.srcObject as MediaStream;
-          if (!ms) {
-            ms = new MediaStream();
-            remoteVideoRef.current.srcObject = ms;
-          }
+          if (!ms) { ms = new MediaStream(); remoteVideoRef.current.srcObject = ms; }
+          return ms;
+        };
+        const ensureLocalStream = () => {
+          if (!myVideoRef.current) return null;
+          let ms = myVideoRef.current.srcObject as MediaStream;
+          if (!ms) { ms = new MediaStream(); myVideoRef.current.srcObject = ms; }
           return ms;
         };
 
         callObject.on("track-started", (e: any) => {
-          console.log("track-started", e.type, e.participant?.user_name);
-          if (!e.participant || e.participant.local) return;
           if (!e.track) return;
+          const track = e.track.persistentTrack || e.track;
+          if (!track) return;
+          
+          if (e.participant?.local) {
+            // VIDEO SAYA
+            if (e.type === 'video') {
+              const ms = ensureLocalStream();
+              if (!ms) return;
+              ms.getVideoTracks().forEach(t => ms.removeTrack(t));
+              ms.addTrack(track);
+              myVideoRef.current?.play().catch(()=>{});
+            }
+            return;
+          }
+          
+          // VIDEO LAWAN
           const ms = ensureRemoteStream();
           if (!ms) return;
-          const track = e.track.persistentTrack || e.track.track || e.track;
           if (e.type === 'video') {
             ms.getVideoTracks().forEach(t => ms.removeTrack(t));
             ms.addTrack(track);
@@ -121,34 +128,21 @@ export default function Room() {
           }
         });
 
-        callObject.on("participant-joined", (e: any) => {
-          console.log("joined", e.participant.user_name);
-          setStatus(`🔔 ${e.participant.user_name} masuk`);
-        });
-        
-        callObject.on("participant-left", () => {
-          setStatus("Peserta keluar");
-          setRemoteName("Menunggu...");
-        });
+        callObject.on("participant-joined", (e: any) => setStatus(`🔔 ${e.participant.user_name} masuk`));
+        callObject.on("participant-left", () => { setStatus("Peserta keluar"); setRemoteName("Menunggu..."); });
 
         const DAILY_DOMAIN = "https://penmeet.daily.co"; 
-        const roomNameFix = String(id).trim().toLowerCase().replace(/\s+/g, '-');
+        const roomNameFix = String(roomName).trim().toLowerCase().replace(/\s+/g, '-');
         
-        setStatus("Membuat room di Daily...");
-        for (let attempt = 0; attempt < 2; attempt++) {
-          try {
-            const res = await fetch('/create-daily-room', { 
-              method: 'POST', 
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ room: roomNameFix }) 
-            });
-            const json = await res.json();
-            console.log("create", json);
-            if (res.ok || json.message === 'Room exists') break;
-          } catch {}
-          await new Promise(r => setTimeout(r, 800));
-        }
-        await new Promise(r => setTimeout(r, 1000));
+        setStatus("Membuat room...");
+        try {
+          await fetch('/api/create-daily-room', { 
+            method: 'POST', 
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ room: roomNameFix }) 
+          });
+        } catch {}
+        await new Promise(r => setTimeout(r, 800));
 
         setStatus("Join room...");
         await callObject.join({ 
@@ -157,25 +151,14 @@ export default function Room() {
         });
         setStatus("Menunggu lawan join...");
 
-        // cek participant yang sudah ada
-        setTimeout(() => {
-          const parts = callObject.participants();
-          Object.values(parts).forEach((p: any) => {
-            if (p.local) return;
-            const vTrack = p.tracks?.video?.persistentTrack;
-            const aTrack = p.tracks?.audio?.persistentTrack;
-            const ms = ensureRemoteStream();
-            if (vTrack && ms) { ms.getVideoTracks().forEach(t=>ms.removeTrack(t)); ms.addTrack(vTrack); remoteVideoRef.current?.play(); }
-            if (aTrack && ms) { ms.getAudioTracks().forEach(t=>ms.removeTrack(t)); ms.addTrack(aTrack); }
-            if (vTrack) { setRemoteName(p.user_name); setStatus(`✅ Tersambung: ${p.user_name}`); }
-          });
-        }, 1000);
-
-      } catch(e) { console.log(e); /create-daisetStatus("Error: " + ((e as any)?.message || e));ly-room }
+      } catch(e: any) { 
+        console.log(e); 
+        setStatus("Error: " + (e?.message || e)); 
+      }
     }
     init();
     return () => { 
-      stream?.getTracks().forEach(t => t.stop());
+      mounted = false;
       try { callRef.current?.leave(); callRef.current?.destroy(); } catch {}
     }
   }, [showNameInput]);
@@ -205,13 +188,13 @@ export default function Room() {
   const handleEndAndSave = async () => { setShowDecision(true); };
   const handleHRKeluar = () => { if (confirm('Yakin keluar?')) router.push('/'); };
   const confirmSave = async () => {
-    const payload = { room: id, namaLengkap: candidateName || "Kandidat Room " + id, posisiDilamar: candidatePosisi || "-", pewawancara: myName, transkrip: transcript, ringkasanAI: aiSummary, keputusan: keputusan, tanggal: new Date().toISOString() };
+    const payload = { room: roomName, namaLengkap: candidateName || "Kandidat Room " + roomName, posisiDilamar: candidatePosisi || "-", pewawancara: myName, transkrip: transcript, ringkasanAI: aiSummary, keputusan: keputusan, tanggal: new Date().toISOString() };
     try { await fetch('/api/simpan-hr', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }); } catch {}
     alert(`Tersimpan! ${payload.namaLengkap} = ${keputusan}`);
     router.push(isHR ? '/' : '/finished');
   };
   const handleCandidateLeave = () => { router.push('/finished'); };
-  const candidateLink = typeof window !== 'undefined' ? `${window.location.origin}/room/${id}` : '';
+  const candidateLink = typeof window !== 'undefined' ? `${window.location.origin}/room/${roomName}` : '';
 
   return (
     <div style={{ width: '100vw', height: '100vh', background: 'black', position: 'relative', overflow: 'hidden' }}>
@@ -221,7 +204,7 @@ export default function Room() {
             {isHR? (
               <>
                 <h2 style={{ fontSize: '22px', fontWeight: '800' }}>Dashboard HR</h2>
-                <p style={{ fontSize: '12px', color: '#666', marginBottom: '18px' }}>Room: {id}</p>
+                <p style={{ fontSize: '12px', color: '#666', marginBottom: '18px' }}>Room: {roomName}</p>
                 <label style={{ fontSize: '12px', fontWeight: '700', display: 'block', marginBottom: '6px' }}>Nama HR</label>
                 <input value={inputName} onChange={e => setInputName(e.target.value)} placeholder="Pak Apen" style={{ width: '100%', padding: '14px', border: '2px solid #e5e7eb', borderRadius: '12px', marginBottom: '18px' }} />
                 <button onClick={handleJoin} style={{ width: '100%', padding: '14px', background: '#111827', color: 'white', borderRadius: '12px', fontWeight: '700' }}>Masuk Dashboard HR</button>
@@ -229,7 +212,7 @@ export default function Room() {
             ) : (
               <>
                 <h2 style={{ fontSize: '22px', fontWeight: '800' }}>Masuk Interview</h2>
-                <p style={{ fontSize: '12px', color: '#666', marginBottom: '18px' }}>Room: {id}</p>
+                <p style={{ fontSize: '12px', color: '#666', marginBottom: '18px' }}>Room: {roomName}</p>
                 <label style={{ fontSize: '12px', fontWeight: '700', display: 'block', marginBottom: '6px' }}>Nama Lengkap</label>
                 <input value={inputName} onChange={e => setInputName(e.target.value)} placeholder="Apen Saputra" style={{ width: '100%', padding: '14px', border: '2px solid #e5e7eb', borderRadius: '12px', marginBottom: '14px' }} />
                 <label style={{ fontSize: '12px', fontWeight: '700', display: 'block', marginBottom: '6px' }}>Posisi</label>
@@ -241,12 +224,13 @@ export default function Room() {
         </div>
       )}
       <video ref={remoteVideoRef} autoPlay playsInline style={{ width: '100%', height: '100%', objectFit: 'contain', background: '#0a0a0a' }} />
-      <video ref={myVideoRef} autoPlay playsInline muted style={{ position: 'absolute', bottom: '90px', right: '20px', width: '140px', height: '105px', borderRadius: '12px', objectFit: 'cover', transform: 'scaleX(-1)', border: '2px solid white', background: '#222', zIndex: 10 }} />
+      {/* FIX: WAJAH BAPAK DIPINDAH KE KIRI, ZINDEX PALING TINGGI BIAR GA KETUTUPAN */}
+      <video ref={myVideoRef} autoPlay playsInline muted style={{ position: 'absolute', bottom: '100px', left: '20px', width: '180px', height: '135px', borderRadius: '16px', objectFit: 'cover', transform: 'scaleX(-1)', border: '3px solid white', background: '#222', zIndex: 40, boxShadow: '0 10px 20px rgba(0,0,0,0.5)' }} />
       <div style={{ position: 'absolute', top: '12px', left: '12px', background: 'rgba(0,0,0,0.7)', color: 'white', padding: '6px 12px', borderRadius: '8px', fontSize: '12px', zIndex: 20 }}>{status} - {remoteName}</div>
       {isHR && (
-        <div style={{ position: 'absolute', top: '50px', right: '16px', width: '340px', background: 'white', borderRadius: '16px', padding: '14px', maxHeight: '85vh', overflow: 'auto', zIndex: 20 }}>
+        <div style={{ position: 'absolute', top: '50px', right: '16px', width: '340px', background: 'white', borderRadius: '16px', padding: '14px', maxHeight: '80vh', overflow: 'auto', zIndex: 25 }}>
           <h3 style={{ fontSize: '14px', fontWeight: '800' }}>Dashboard HR</h3>
-          <p style={{ fontSize: '11px', color: '#666', marginBottom: '12px' }}>Room: {id}</p>
+          <p style={{ fontSize: '11px', color: '#666', marginBottom: '12px' }}>Room: {roomName}</p>
           <div style={{ background: '#f3f4f6', padding: '10px', borderRadius: '10px', marginBottom: '12px' }}>
             <p style={{ fontSize: '10px', fontWeight: '800', marginBottom: '6px' }}>LINK KANDIDAT:</p>
             <p style={{ fontSize: '10px', wordBreak: 'break-all', background: 'white', padding: '6px', borderRadius: '6px' }}>{candidateLink}</p>
@@ -259,8 +243,8 @@ export default function Room() {
         </div>
       )}
       <div style={{ position: 'absolute', bottom: '16px', left: '50%', transform: 'translateX(-50%)', background: '#1f2937', padding: '8px 16px', borderRadius: '999px', display: 'flex', gap: '10px', alignItems: 'center', zIndex: 30 }}>
-        <button onClick={() => { const s = cameraStreamRef.current; s?.getAudioTracks().forEach(t => t.enabled =!t.enabled); setMicOn(v=>!v); }} style={{ width: '48px', height: '48px', borderRadius: '50%', background: micOn? '#374151' : '#ef4444', color: 'white' }}>{micOn? '🎤' : '🔇'}</button>
-        <button onClick={() => { const s = cameraStreamRef.current; s?.getVideoTracks().forEach(t => t.enabled =!t.enabled); setCamOn(v=>!v); }} style={{ width: '48px', height: '48px', borderRadius: '50%', background: camOn? '#374151' : '#ef4444', color: 'white' }}>{camOn? '📹' : '📷'}</button>
+        <button onClick={() => { try{ callRef.current?.setLocalAudio(!micOn); }catch{}; setMicOn(v=>!v); }} style={{ width: '48px', height: '48px', borderRadius: '50%', background: micOn? '#374151' : '#ef4444', color: 'white' }}>{micOn? '🎤' : '🔇'}</button>
+        <button onClick={() => { try{ callRef.current?.setLocalVideo(!camOn); }catch{}; setCamOn(v=>!v); }} style={{ width: '48px', height: '48px', borderRadius: '50%', background: camOn? '#374151' : '#ef4444', color: 'white' }}>{camOn? '📹' : '📷'}</button>
         <button onClick={toggleShareScreen} style={{ width: '48px', height: '48px', borderRadius: '50%', background: isSharing ? '#2563eb' : '#374151', color: 'white' }}>{isSharing ? '🛑' : '🖥️'}</button>
         {isHR? (
           <>

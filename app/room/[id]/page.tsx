@@ -12,8 +12,7 @@ export default function Room() {
   const searchParams = useSearchParams();
   const isHR = searchParams.get("role") === "hr";
 
-  const myVideoRef = useRef<HTMLVideoElement>(null);
-  const remoteVideoRef = useRef<HTMLVideoElement>(null);
+  const dailyContainerRef = useRef<HTMLDivElement>(null);
 
   const [myName, setMyName] = useState("");
   const [myPosition, setMyPosition] = useState("");
@@ -36,7 +35,6 @@ export default function Room() {
   const recognitionRef = useRef<any>(null);
 
   const [isSharing, setIsSharing] = useState(false);
-  const cameraStreamRef = useRef<MediaStream | null>(null);
   const callRef = useRef<any>(null);
 
   const toggleShareScreen = async () => {
@@ -57,127 +55,110 @@ export default function Room() {
   const handleJoin = () => {
     if (!inputName.trim()) return alert("Isi nama dulu bro!");
     if (!isHR && !inputPosisi.trim()) return alert("Isi posisi dulu!");
-    setMyName(inputName.trim());
+    const name = inputName.trim();
+    setMyName(name);
+    localStorage.setItem("penmeet-name", name);
     if (isHR) {
       setMyPosition("HR / Interviewer");
-      localStorage.setItem("penmeet-name", inputName.trim());
-      setShowNameInput(false);
     } else {
-      setMyPosition(inputPosisi.trim());
-      setCandidateName(inputName.trim());
-      setCandidatePosisi(inputPosisi.trim());
-      setRemoteName(`${inputName.trim()} - ${inputPosisi.trim()}`);
-      localStorage.setItem("penmeet-name", inputName.trim());
-      localStorage.setItem("penmeet-posisi", inputPosisi.trim());
-      setShowNameInput(false);
+      const posisi = inputPosisi.trim();
+      setMyPosition(posisi);
+      setCandidateName(name);
+      setCandidatePosisi(posisi);
+      setRemoteName(`${name} - ${posisi}`);
+      localStorage.setItem("penmeet-posisi", posisi);
     }
+    setShowNameInput(false);
   };
 
   useEffect(() => {
     if (showNameInput) return;
-    let stream: MediaStream;
+    const container = dailyContainerRef.current;
+    if (!container) return;
+
+    let destroyed = false;
     async function init() {
       try {
-        stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
-        cameraStreamRef.current = stream;
-        if (myVideoRef.current) {
-          myVideoRef.current.srcObject = stream;
-          await myVideoRef.current.play().catch(()=>{});
-        }
-
         const Daily = (await import("@daily-co/daily-js")).default;
-        const callObject = Daily.createCallObject();
-        callRef.current = callObject;
+        if (destroyed || !dailyContainerRef.current) return;
 
-        // === FIX UTAMA ANTI HITAM ===
-        const ensureRemoteStream = () => {
-          if (!remoteVideoRef.current) return null;
-          let ms = remoteVideoRef.current.srcObject as MediaStream;
-          if (!ms) {
-            ms = new MediaStream();
-            remoteVideoRef.current.srcObject = ms;
-          }
-          return ms;
-        };
+        try { callRef.current?.destroy(); } catch {}
+        dailyContainerRef.current.innerHTML = "";
 
-        callObject.on("track-started", (e: any) => {
-          console.log("track-started", e.type, e.participant?.user_name);
-          if (!e.participant || e.participant.local) return;
-          if (!e.track) return;
-          const ms = ensureRemoteStream();
-          if (!ms) return;
-          const track = e.track.persistentTrack || e.track.track || e.track;
-          if (e.type === 'video') {
-            ms.getVideoTracks().forEach(t => ms.removeTrack(t));
-            ms.addTrack(track);
-            remoteVideoRef.current?.play().then(()=>{
-              setRemoteName(e.participant.user_name || "Tersambung");
-              setStatus(`✅ Tersambung: ${e.participant.user_name}`);
-            }).catch(()=>{});
-          }
-          if (e.type === 'audio') {
-            ms.getAudioTracks().forEach(t => ms.removeTrack(t));
-            ms.addTrack(track);
-          }
+        const callFrame = Daily.createFrame(dailyContainerRef.current, {
+          showLeaveButton: false,
+          iframeStyle: {
+            position: "absolute",
+            top: "0",
+            left: "0",
+            width: "100%",
+            height: "100%",
+            border: "0",
+          },
         });
+        callRef.current = callFrame;
 
-        callObject.on("participant-joined", (e: any) => {
-          console.log("joined", e.participant.user_name);
+        callFrame.on("joined-meeting", () => {
+          setStatus("Menunggu lawan join...");
+        });
+        callFrame.on("participant-joined", (e: any) => {
+          if (!e.participant || e.participant.local) return;
+          setRemoteName(e.participant.user_name || "Tersambung");
           setStatus(`🔔 ${e.participant.user_name} masuk`);
         });
-        
-        callObject.on("participant-left", () => {
+        callFrame.on("participant-updated", (e: any) => {
+          if (!e.participant || e.participant.local) return;
+          if (e.participant.video || e.participant.audio) {
+            setRemoteName(e.participant.user_name || "Tersambung");
+            setStatus(`✅ Tersambung: ${e.participant.user_name}`);
+          }
+        });
+        callFrame.on("participant-left", () => {
           setStatus("Peserta keluar");
           setRemoteName("Menunggu...");
         });
+        callFrame.on("error", (e: any) => {
+          setStatus("Error: " + (e?.errorMsg || e?.error?.msg || "Daily error"));
+        });
 
-        const DAILY_DOMAIN = "https://penmeet.daily.co"; 
-        const roomNameFix = String(id).trim().toLowerCase().replace(/\s+/g, '-');
-        
+        const DAILY_DOMAIN = "https://penmeet.daily.co";
+        const roomNameFix = String(id).trim().toLowerCase().replace(/\s+/g, "-");
+
         setStatus("Membuat room di Daily...");
         for (let attempt = 0; attempt < 2; attempt++) {
           try {
-            const res = await fetch('/api/create-daily-room', { 
-              method: 'POST', 
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ room: roomNameFix }) 
+            const res = await fetch("/create-daily-room", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ room: roomNameFix }),
             });
             const json = await res.json();
             console.log("create", json);
-            if (res.ok || json.message === 'Room exists') break;
+            if (res.ok || json.message === "Room exists") break;
           } catch {}
-          await new Promise(r => setTimeout(r, 800));
+          await new Promise((r) => setTimeout(r, 800));
         }
-        await new Promise(r => setTimeout(r, 1000));
 
+        if (destroyed) return;
         setStatus("Join room...");
-        await callObject.join({ 
+        await callFrame.join({
           url: `${DAILY_DOMAIN}/${roomNameFix}`,
-          userName: isHR ? `HR-${myName || inputName}` : `${candidateName || myName || inputName} - ${myPosition || inputPosisi}`
+          userName: isHR
+            ? `HR-${myName || inputName}`
+            : `${candidateName || myName || inputName} - ${myPosition || inputPosisi}`,
         });
-        setStatus("Menunggu lawan join...");
-
-        // cek participant yang sudah ada
-        setTimeout(() => {
-          const parts = callObject.participants();
-          Object.values(parts).forEach((p: any) => {
-            if (p.local) return;
-            const vTrack = p.tracks?.video?.persistentTrack;
-            const aTrack = p.tracks?.audio?.persistentTrack;
-            const ms = ensureRemoteStream();
-            if (vTrack && ms) { ms.getVideoTracks().forEach(t=>ms.removeTrack(t)); ms.addTrack(vTrack); remoteVideoRef.current?.play(); }
-            if (aTrack && ms) { ms.getAudioTracks().forEach(t=>ms.removeTrack(t)); ms.addTrack(aTrack); }
-            if (vTrack) { setRemoteName(p.user_name); setStatus(`✅ Tersambung: ${p.user_name}`); }
-          });
-        }, 1000);
-
-      } catch(e) { console.log(e); alert("Izinkan kamera dulu Pak!"); setStatus("Error kamera"); }
+        if (!destroyed) setStatus("Menunggu lawan join...");
+      } catch (e: any) {
+        console.log(e);
+        setStatus("Error: " + (e?.message || e));
+      }
     }
     init();
-    return () => { 
-      stream?.getTracks().forEach(t => t.stop());
+    return () => {
+      destroyed = true;
       try { callRef.current?.leave(); callRef.current?.destroy(); } catch {}
-    }
+      callRef.current = null;
+    };
   }, [showNameInput]);
 
   const toggleTranskrip = () => {
@@ -185,7 +166,7 @@ export default function Room() {
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!SpeechRecognition) return alert("Pakai Chrome!");
     const recognition = new SpeechRecognition();
-    recognition.continuous = true; recognition.interimResults = true; recognition.lang = 'id-ID';
+    recognition.continuous = true; recognition.interimResults = true; recognition.lang = "id-ID";
     recognition.onresult = (event: any) => {
       let text = ""; for (let i = 0; i < event.results.length; i++) text += event.results[i][0].transcript + " ";
       setTranscript(text);
@@ -197,88 +178,90 @@ export default function Room() {
     if (!transcript) return alert("Belum ada transkrip!");
     setLoadingAI(true);
     try {
-      const res = await fetch('/api/ringkas', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ transcript, posisi: candidatePosisi || myPosition }) });
+      const res = await fetch("/api/ringkas", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ transcript, posisi: candidatePosisi || myPosition }) });
       const data = await res.json(); setAiSummary(data.summary);
     } catch { alert("Gagal ringkas"); }
     setLoadingAI(false);
   };
   const handleEndAndSave = async () => { setShowDecision(true); };
-  const handleHRKeluar = () => { if (confirm('Yakin keluar?')) router.push('/'); };
+  const handleHRKeluar = () => { if (confirm("Yakin keluar?")) router.push("/"); };
   const confirmSave = async () => {
     const payload = { room: id, namaLengkap: candidateName || "Kandidat Room " + id, posisiDilamar: candidatePosisi || "-", pewawancara: myName, transkrip: transcript, ringkasanAI: aiSummary, keputusan: keputusan, tanggal: new Date().toISOString() };
-    try { await fetch('/api/simpan-hr', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }); } catch {}
+    try { await fetch("/api/simpan-hr", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) }); } catch {}
     alert(`Tersimpan! ${payload.namaLengkap} = ${keputusan}`);
-    router.push(isHR ? '/' : '/finished');
+    router.push(isHR ? "/" : "/finished");
   };
-  const handleCandidateLeave = () => { router.push('/finished'); };
-  const candidateLink = typeof window !== 'undefined' ? `${window.location.origin}/room/${id}` : '';
+  const handleCandidateLeave = () => { router.push("/finished"); };
+  const candidateLink = typeof window !== "undefined" ? `${window.location.origin}/room/${id}` : "";
 
   return (
-    <div style={{ width: '100vw', height: '100vh', background: 'black', position: 'relative', overflow: 'hidden' }}>
+    <div style={{ position: "fixed", inset: 0, width: "100%", height: "100%", background: "black", overflow: "hidden" }}>
       {showNameInput && (
-        <div style={{ position: 'absolute', inset: 0, background: 'rgba(0,0,0,0.95)', zIndex: 100, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '16px' }}>
-          <div style={{ background: 'white', padding: '28px', borderRadius: '20px', width: '100%', maxWidth: '380px' }}>
+        <div style={{ position: "absolute", inset: 0, background: "rgba(0,0,0,0.95)", zIndex: 100, display: "flex", alignItems: "center", justifyContent: "center", padding: "16px" }}>
+          <div style={{ background: "white", padding: "28px", borderRadius: "20px", width: "100%", maxWidth: "380px" }}>
             {isHR? (
               <>
-                <h2 style={{ fontSize: '22px', fontWeight: '800' }}>Dashboard HR</h2>
-                <p style={{ fontSize: '12px', color: '#666', marginBottom: '18px' }}>Room: {id}</p>
-                <label style={{ fontSize: '12px', fontWeight: '700', display: 'block', marginBottom: '6px' }}>Nama HR</label>
-                <input value={inputName} onChange={e => setInputName(e.target.value)} placeholder="Pak Apen" style={{ width: '100%', padding: '14px', border: '2px solid #e5e7eb', borderRadius: '12px', marginBottom: '18px' }} />
-                <button onClick={handleJoin} style={{ width: '100%', padding: '14px', background: '#111827', color: 'white', borderRadius: '12px', fontWeight: '700' }}>Masuk Dashboard HR</button>
+                <h2 style={{ fontSize: "22px", fontWeight: "800" }}>Dashboard HR</h2>
+                <p style={{ fontSize: "12px", color: "#666", marginBottom: "18px" }}>Room: {id}</p>
+                <label style={{ fontSize: "12px", fontWeight: "700", display: "block", marginBottom: "6px" }}>Nama HR</label>
+                <input value={inputName} onChange={e => setInputName(e.target.value)} onKeyDown={e => e.key === "Enter" && handleJoin()} placeholder="Pak Apen" style={{ width: "100%", padding: "14px", border: "2px solid #e5e7eb", borderRadius: "12px", marginBottom: "18px" }} />
+                <button type="button" onClick={handleJoin} style={{ width: "100%", padding: "14px", background: "#111827", color: "white", borderRadius: "12px", fontWeight: "700", cursor: "pointer" }}>Masuk Dashboard HR</button>
               </>
             ) : (
               <>
-                <h2 style={{ fontSize: '22px', fontWeight: '800' }}>Masuk Interview</h2>
-                <p style={{ fontSize: '12px', color: '#666', marginBottom: '18px' }}>Room: {id}</p>
-                <label style={{ fontSize: '12px', fontWeight: '700', display: 'block', marginBottom: '6px' }}>Nama Lengkap</label>
-                <input value={inputName} onChange={e => setInputName(e.target.value)} placeholder="Apen Saputra" style={{ width: '100%', padding: '14px', border: '2px solid #e5e7eb', borderRadius: '12px', marginBottom: '14px' }} />
-                <label style={{ fontSize: '12px', fontWeight: '700', display: 'block', marginBottom: '6px' }}>Posisi</label>
-                <input value={inputPosisi} onChange={e => setInputPosisi(e.target.value)} placeholder="Sales" style={{ width: '100%', padding: '14px', border: '2px solid #e5e7eb', borderRadius: '12px', marginBottom: '18px' }} />
-                <button onClick={handleJoin} style={{ width: '100%', padding: '14px', background: '#2563eb', color: 'white', borderRadius: '12px', fontWeight: '700' }}>Gabung Interview</button>
+                <h2 style={{ fontSize: "22px", fontWeight: "800" }}>Masuk Interview</h2>
+                <p style={{ fontSize: "12px", color: "#666", marginBottom: "18px" }}>Room: {id}</p>
+                <label style={{ fontSize: "12px", fontWeight: "700", display: "block", marginBottom: "6px" }}>Nama Lengkap</label>
+                <input value={inputName} onChange={e => setInputName(e.target.value)} placeholder="Apen Saputra" style={{ width: "100%", padding: "14px", border: "2px solid #e5e7eb", borderRadius: "12px", marginBottom: "14px" }} />
+                <label style={{ fontSize: "12px", fontWeight: "700", display: "block", marginBottom: "6px" }}>Posisi</label>
+                <input value={inputPosisi} onChange={e => setInputPosisi(e.target.value)} onKeyDown={e => e.key === "Enter" && handleJoin()} placeholder="Sales" style={{ width: "100%", padding: "14px", border: "2px solid #e5e7eb", borderRadius: "12px", marginBottom: "18px" }} />
+                <button type="button" onClick={handleJoin} style={{ width: "100%", padding: "14px", background: "#2563eb", color: "white", borderRadius: "12px", fontWeight: "700", cursor: "pointer" }}>Gabung Interview</button>
               </>
             )}
           </div>
         </div>
       )}
-      <video ref={remoteVideoRef} autoPlay playsInline style={{ width: '100%', height: '100%', objectFit: 'contain', background: '#0a0a0a' }} />
-      <video ref={myVideoRef} autoPlay playsInline muted style={{ position: 'absolute', bottom: '90px', right: '20px', width: '140px', height: '105px', borderRadius: '12px', objectFit: 'cover', transform: 'scaleX(-1)', border: '2px solid white', background: '#222', zIndex: 10 }} />
-      <div style={{ position: 'absolute', top: '12px', left: '12px', background: 'rgba(0,0,0,0.7)', color: 'white', padding: '6px 12px', borderRadius: '8px', fontSize: '12px', zIndex: 20 }}>{status} - {remoteName}</div>
+      <div
+        ref={dailyContainerRef}
+        style={{ position: "absolute", inset: 0, width: "100%", height: "100%", zIndex: 1, background: "#0a0a0a" }}
+      />
+      <div style={{ position: "absolute", top: "12px", left: "12px", background: "rgba(0,0,0,0.7)", color: "white", padding: "6px 12px", borderRadius: "8px", fontSize: "12px", zIndex: 20 }}>{status} - {remoteName}</div>
       {isHR && (
-        <div style={{ position: 'absolute', top: '50px', right: '16px', width: '340px', background: 'white', borderRadius: '16px', padding: '14px', maxHeight: '85vh', overflow: 'auto', zIndex: 20 }}>
-          <h3 style={{ fontSize: '14px', fontWeight: '800' }}>Dashboard HR</h3>
-          <p style={{ fontSize: '11px', color: '#666', marginBottom: '12px' }}>Room: {id}</p>
-          <div style={{ background: '#f3f4f6', padding: '10px', borderRadius: '10px', marginBottom: '12px' }}>
-            <p style={{ fontSize: '10px', fontWeight: '800', marginBottom: '6px' }}>LINK KANDIDAT:</p>
-            <p style={{ fontSize: '10px', wordBreak: 'break-all', background: 'white', padding: '6px', borderRadius: '6px' }}>{candidateLink}</p>
-            <button onClick={() => { navigator.clipboard.writeText(candidateLink); alert("Link tercopy!"); }} style={{ marginTop: '8px', width: '100%', padding: '8px', background: '#111827', color: 'white', borderRadius: '8px', fontSize: '11px', fontWeight: '700' }}>📋 Copy Link</button>
+        <div style={{ position: "absolute", top: "50px", right: "16px", width: "340px", background: "white", borderRadius: "16px", padding: "14px", maxHeight: "85vh", overflow: "auto", zIndex: 20 }}>
+          <h3 style={{ fontSize: "14px", fontWeight: "800" }}>Dashboard HR</h3>
+          <p style={{ fontSize: "11px", color: "#666", marginBottom: "12px" }}>Room: {id}</p>
+          <div style={{ background: "#f3f4f6", padding: "10px", borderRadius: "10px", marginBottom: "12px" }}>
+            <p style={{ fontSize: "10px", fontWeight: "800", marginBottom: "6px" }}>LINK KANDIDAT:</p>
+            <p style={{ fontSize: "10px", wordBreak: "break-all", background: "white", padding: "6px", borderRadius: "6px" }}>{candidateLink}</p>
+            <button type="button" onClick={() => { navigator.clipboard.writeText(candidateLink); alert("Link tercopy!"); }} style={{ marginTop: "8px", width: "100%", padding: "8px", background: "#111827", color: "white", borderRadius: "8px", fontSize: "11px", fontWeight: "700", cursor: "pointer" }}>📋 Copy Link</button>
           </div>
-          <button onClick={toggleTranskrip} style={{ width: '100%', padding: '10px', borderRadius: '10px', background: isRecording? '#ef4444' : '#2563eb', color: 'white', fontWeight: '700', fontSize: '12px', marginBottom: '10px' }}>{isRecording? '🔴 Stop Catat' : '🎙️ Mulai Catat'}</button>
-          <textarea value={transcript} onChange={e => setTranscript(e.target.value)} placeholder="Transkrip..." style={{ width: '100%', height: '90px', border: '1px solid #e5e7eb', borderRadius: '8px', padding: '8px', fontSize: '11px', marginBottom: '10px' }} />
-          <button onClick={ringkasDenganAI} disabled={loadingAI} style={{ width: '100%', padding: '10px', borderRadius: '10px', background: '#16a34a', color: 'white', fontWeight: '700', fontSize: '12px', marginBottom: '10px' }}>{loadingAI? 'Merangkum...' : '✨ Ringkas AI'}</button>
-          {aiSummary && <div style={{ background: '#f0fdf4', border: '1px solid #bbf7d0', padding: '10px', borderRadius: '8px', fontSize: '11px', whiteSpace: 'pre-wrap' }}>{aiSummary}</div>}
+          <button type="button" onClick={toggleTranskrip} style={{ width: "100%", padding: "10px", borderRadius: "10px", background: isRecording? "#ef4444" : "#2563eb", color: "white", fontWeight: "700", fontSize: "12px", marginBottom: "10px", cursor: "pointer" }}>{isRecording? "🔴 Stop Catat" : "🎙️ Mulai Catat"}</button>
+          <textarea value={transcript} onChange={e => setTranscript(e.target.value)} placeholder="Transkrip..." style={{ width: "100%", height: "90px", border: "1px solid #e5e7eb", borderRadius: "8px", padding: "8px", fontSize: "11px", marginBottom: "10px" }} />
+          <button type="button" onClick={ringkasDenganAI} disabled={loadingAI} style={{ width: "100%", padding: "10px", borderRadius: "10px", background: "#16a34a", color: "white", fontWeight: "700", fontSize: "12px", marginBottom: "10px", cursor: "pointer" }}>{loadingAI? "Merangkum..." : "✨ Ringkas AI"}</button>
+          {aiSummary && <div style={{ background: "#f0fdf4", border: "1px solid #bbf7d0", padding: "10px", borderRadius: "8px", fontSize: "11px", whiteSpace: "pre-wrap" }}>{aiSummary}</div>}
         </div>
       )}
-      <div style={{ position: 'absolute', bottom: '16px', left: '50%', transform: 'translateX(-50%)', background: '#1f2937', padding: '8px 16px', borderRadius: '999px', display: 'flex', gap: '10px', alignItems: 'center', zIndex: 30 }}>
-        <button onClick={() => { const s = cameraStreamRef.current; s?.getAudioTracks().forEach(t => t.enabled =!t.enabled); setMicOn(v=>!v); }} style={{ width: '48px', height: '48px', borderRadius: '50%', background: micOn? '#374151' : '#ef4444', color: 'white' }}>{micOn? '🎤' : '🔇'}</button>
-        <button onClick={() => { const s = cameraStreamRef.current; s?.getVideoTracks().forEach(t => t.enabled =!t.enabled); setCamOn(v=>!v); }} style={{ width: '48px', height: '48px', borderRadius: '50%', background: camOn? '#374151' : '#ef4444', color: 'white' }}>{camOn? '📹' : '📷'}</button>
-        <button onClick={toggleShareScreen} style={{ width: '48px', height: '48px', borderRadius: '50%', background: isSharing ? '#2563eb' : '#374151', color: 'white' }}>{isSharing ? '🛑' : '🖥️'}</button>
+      <div style={{ position: "absolute", bottom: "16px", left: "50%", transform: "translateX(-50%)", background: "#1f2937", padding: "8px 16px", borderRadius: "999px", display: "flex", gap: "10px", alignItems: "center", zIndex: 30 }}>
+        <button type="button" onClick={() => { try { callRef.current?.setLocalAudio(!micOn); } catch {} setMicOn(v=>!v); }} style={{ width: "48px", height: "48px", borderRadius: "50%", background: micOn? "#374151" : "#ef4444", color: "white", cursor: "pointer" }}>{micOn? "🎤" : "🔇"}</button>
+        <button type="button" onClick={() => { try { callRef.current?.setLocalVideo(!camOn); } catch {} setCamOn(v=>!v); }} style={{ width: "48px", height: "48px", borderRadius: "50%", background: camOn? "#374151" : "#ef4444", color: "white", cursor: "pointer" }}>{camOn? "📹" : "📷"}</button>
+        <button type="button" onClick={toggleShareScreen} style={{ width: "48px", height: "48px", borderRadius: "50%", background: isSharing ? "#2563eb" : "#374151", color: "white", cursor: "pointer" }}>{isSharing ? "🛑" : "🖥️"}</button>
         {isHR? (
           <>
-            <button onClick={handleHRKeluar} style={{ padding: '0 18px', height: '48px', borderRadius: '24px', background: '#e5e7eb', fontWeight: '700', fontSize: '13px' }}>Keluar</button>
-            <button onClick={handleEndAndSave} style={{ padding: '0 22px', height: '48px', borderRadius: '24px', background: '#ef4444', color: 'white', fontWeight: '700' }}>END & SIMPAN</button>
+            <button type="button" onClick={handleHRKeluar} style={{ padding: "0 18px", height: "48px", borderRadius: "24px", background: "#e5e7eb", fontWeight: "700", fontSize: "13px", cursor: "pointer" }}>Keluar</button>
+            <button type="button" onClick={handleEndAndSave} style={{ padding: "0 22px", height: "48px", borderRadius: "24px", background: "#ef4444", color: "white", fontWeight: "700", cursor: "pointer" }}>END & SIMPAN</button>
           </>
         ) : (
-          <button onClick={handleCandidateLeave} style={{ padding: '0 22px', height: '48px', borderRadius: '24px', background: '#111827', color: 'white', fontWeight: '700' }}>Selesai</button>
+          <button type="button" onClick={handleCandidateLeave} style={{ padding: "0 22px", height: "48px", borderRadius: "24px", background: "#111827", color: "white", fontWeight: "700", cursor: "pointer" }}>Selesai</button>
         )}
       </div>
       {showDecision && (
-        <div style={{ position: 'absolute', inset: 0, background: 'rgba(0,0,0,0.9)', zIndex: 200, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-          <div style={{ background: 'white', padding: '24px', borderRadius: '16px', width: '320px' }}>
-            <h3 style={{ fontWeight: '800', marginBottom: '12px' }}>Keputusan?</h3>
-            <select value={keputusan} onChange={e => setKeputusan(e.target.value)} style={{ width: '100%', padding: '10px', borderRadius: '8px', marginBottom: '12px' }}>
+        <div style={{ position: "absolute", inset: 0, background: "rgba(0,0,0,0.9)", zIndex: 200, display: "flex", alignItems: "center", justifyContent: "center" }}>
+          <div style={{ background: "white", padding: "24px", borderRadius: "16px", width: "320px" }}>
+            <h3 style={{ fontWeight: "800", marginBottom: "12px" }}>Keputusan?</h3>
+            <select value={keputusan} onChange={e => setKeputusan(e.target.value)} style={{ width: "100%", padding: "10px", borderRadius: "8px", marginBottom: "12px" }}>
               <option>DITERIMA</option><option>DIPERTIMBANGKAN</option><option>DITOLAK</option>
             </select>
-            <button onClick={confirmSave} style={{ width: '100%', padding: '12px', background: '#16a34a', color: 'white', borderRadius: '8px', fontWeight: '700' }}>Simpan</button>
+            <button type="button" onClick={confirmSave} style={{ width: "100%", padding: "12px", background: "#16a34a", color: "white", borderRadius: "8px", fontWeight: "700", cursor: "pointer" }}>Simpan</button>
           </div>
         </div>
       )}

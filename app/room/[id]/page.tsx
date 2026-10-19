@@ -192,7 +192,10 @@ export default function Room() {
     router.push(isHR ? "/" : "/finished");
   };
   const handleCandidateLeave = () => { router.push("/finished"); };
-  const candidateLink = typeof window !== "undefined" ? `${window.location.origin}/room/${id}` : "";
+  const [candidateLink, setCandidateLink] = useState("");
+  useEffect(() => {
+    setCandidateLink(`${window.location.origin}/room/${id}`);
+  }, [id]);
 
   return (
     <div style={{ position: "fixed", inset: 0, width: "100%", height: "100%", background: "black", overflow: "hidden" }}>
